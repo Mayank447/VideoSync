@@ -1,0 +1,58 @@
+body {
+    font-family: Arial, sans-serif;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 1rem;
+}
+
+#videoContainer {
+    position: relative;
+    max-width: 800px;
+    margin: 2rem auto;
+}
+
+#videoPlayer {
+    width: 100%;
+    height: auto;
+    background: #000;
+    border-radius: 8px;
+}
+
+.controls {
+    margin-top: 1rem;
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+button {
+    padding: 0.5rem 1rem;
+    background: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+button:disabled {
+    background: #6c757d;
+    cursor: not-allowed;
+}
+
+#sessionInfo {
+    margin: 1rem 0;
+    padding: 1rem;
+    background: #f8f9fa;
+    border-radius: 8px;
+}
+
+#statusMessage {
+    color: #dc3545;
+    margin-top: 1rem;
+}
+
+.timestamp {
+    font-family: monospace;
+    font-size: 1.1rem;
+}
