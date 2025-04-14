@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
+	"github.com/gorilla/handlers" // For CORS
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 )
@@ -46,12 +47,19 @@ func main() {
 	// API routes
 	r.HandleFunc("/api/sessions", createSession).Methods("POST")
 	r.HandleFunc("/api/sessions/{key}/validate", validateSession).Methods("GET")
-	r.HandleFunc("/api/video", streamVideo).Methods("GET")
+	r.HandleFunc("/api/video", streamVideo).Methods("GET", "HEAD")
 	r.HandleFunc("/ws", handleWebSocket)
 
 	// Start server
 	log.Println("Starting server on :8080")
-	log.Fatal(http.ListenAndServe(":8080", r))
+
+	// With CORS-enabled server:
+	headersOk := handlers.AllowedHeaders([]string{"Content-Type"})
+	originsOk := handlers.AllowedOrigins([]string{"*"})
+	methodsOk := handlers.AllowedMethods([]string{"GET", "POST", "OPTIONS"})
+
+	log.Fatal(http.ListenAndServe(":8080",
+		handlers.CORS(originsOk, headersOk, methodsOk)(r)))
 }
 
 // Session creation endpoint
@@ -182,6 +190,10 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // Video streaming endpoint
 func streamVideo(w http.ResponseWriter, r *http.Request) {
+	// Add CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD")
+
 	videoFile, err := os.Open(videoPath)
 	if err != nil {
 		http.Error(w, "Video not found", http.StatusNotFound)

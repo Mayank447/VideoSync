@@ -1,6 +1,6 @@
 async function createSession() {
     try {
-        const response = await fetch('/api/sessions', {
+        const response = await fetch('http://localhost:8080/api/sessions', {
             method: 'POST'
         });
         
@@ -35,12 +35,12 @@ async function joinSession() {
 
     try {
         // Validate session key
-        const response = await fetch(`/api/sessions/${sessionKey}/validate`);
+        const response = await fetch(`http://localhost:8080/api/sessions/${sessionKey}/validate`);
         
         if (!response.ok) throw new Error('Invalid session key');
         
         // Redirect to player page with session key
-        window.location.href = `/player.html?sessionKey=${encodeURIComponent(sessionKey)}`;
+        window.location.href = `/pages/video_player.html?sessionKey=${encodeURIComponent(sessionKey)}`;
         
     } catch (error) {
         errorElement.textContent = 'Invalid session key. Please check and try again.';

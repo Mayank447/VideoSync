@@ -5,7 +5,7 @@ let ws = null;
 
 // Initialize WebSocket connection
 function connectWebSocket() {
-    ws = new WebSocket(`wss://your-api-domain.com/ws?sessionKey=${sessionKey}`);
+    ws = new WebSocket(`ws://localhost:8080/ws?sessionKey=${sessionKey}`);
 
     ws.onopen = () => {
         console.log('WebSocket connected');

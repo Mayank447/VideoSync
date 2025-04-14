@@ -13,7 +13,9 @@
     </div>
 
     <div id="videoContainer">
-        <video id="videoPlayer" controls></video>
+        <video id="videoPlayer" controls>
+            <source src="http://localhost:8080/api/video" type="video/mp4">
+        </video>
         <div class="controls">
             <button id="playPauseBtn" disabled>Play/Pause</button>
             <input type="range" id="seekBar" min="0" value="0" step="1" style="flex-grow: 1;" disabled>
