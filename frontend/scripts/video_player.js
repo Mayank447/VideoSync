@@ -97,18 +97,27 @@ function handleHeartbeat() {
 function updateControls() {
     const controls = document.querySelectorAll('.controls button, #seekBar');
     controls.forEach(control => {
-        control.disabled = !isHost;
+        control.disabled = !isHost; // Disable controls for participants
     });
+
+    // Disable native video controls (play/pause) for participants
+    videoElement.controls = isHost; // Enable/Disable native controls based on role
+
+    // Disable the native play/pause functionality for participants
+    if (!isHost) {
+        videoElement.removeAttribute('controls');
+    } else {
+        videoElement.setAttribute('controls', 'true');
+    }
 }
 
-// Event listeners
+// Event listeners for video events
 videoElement.addEventListener('play', () => sendPlayerState('play'));
 videoElement.addEventListener('pause', () => sendPlayerState('pause'));
 videoElement.addEventListener('seeked', () => sendPlayerState('seek'));
 
 videoElement.addEventListener('timeupdate', () => {
-    document.getElementById('currentTime').textContent = 
-        formatTime(videoElement.currentTime);
+    document.getElementById('currentTime').textContent = formatTime(videoElement.currentTime);
     document.getElementById('seekBar').value = videoElement.currentTime;
 });
 
