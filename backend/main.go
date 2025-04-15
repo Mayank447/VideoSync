@@ -61,6 +61,49 @@ func main() {
 	// Create router
 	r := mux.NewRouter()
 
+	// Health Check endpoint
+
+	// Add error recovery middleware
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if err := recover(); err != nil {
+					log.Printf("Panic recovered: %v", err)
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				}
+			}()
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	// Add logging middleware
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("Incoming connection from %s to %s %s", r.RemoteAddr, r.Method, r.URL.Path)
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	// Health check endpoint
+	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Health check request from %s", r.RemoteAddr)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status": "ok",
+			"time":   time.Now().String(),
+		})
+	}).Methods("GET")
+
+	// Root endpoint
+	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Root request from %s", r.RemoteAddr)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "VideoSync API Server",
+			"status":  "running",
+		})
+	}).Methods("GET")
+
 	// API routes
 	r.HandleFunc("/api/sessions", createSession).Methods("POST")
 	r.HandleFunc("/api/sessions/{key}/validate", validateSession).Methods("GET")
@@ -82,7 +125,7 @@ func main() {
 	methodsOk := handlers.AllowedMethods([]string{"GET", "POST", "OPTIONS"})
 	exposedOk := handlers.ExposedHeaders([]string{"Content-Length"})
 
-	log.Fatal(http.ListenAndServe(":8080",
+	log.Fatal(http.ListenAndServe("0.0.0.0:8080",
 		handlers.CORS(originsOk, headersOk, methodsOk, exposedOk)(r)))
 }
 
