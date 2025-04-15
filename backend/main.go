@@ -18,9 +18,21 @@ import (
 
 var (
 	rdb          *redis.Client
-	upgrader     = websocket.Upgrader{}
 	sessionMutex = &sync.Mutex{}
 )
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		// Allow all origins during development
+		return true
+
+		// For production: validate specific origins
+		// origin := r.Header.Get("Origin")
+		// return origin == "http://your-frontend-ip:8000"
+	},
+}
 
 var connections = struct {
 	sync.Mutex
@@ -59,7 +71,13 @@ func main() {
 	log.Println("Starting server on :8080")
 
 	// With CORS-enabled server (Middle ware)
-	headersOk := handlers.AllowedHeaders([]string{"Content-Type", "Authorization"})
+	headersOk := handlers.AllowedHeaders([]string{
+		"Content-Type",
+		"Origin",
+		"Sec-WebSocket-Extensions",
+		"Sec-WebSocket-Key",
+		"Sec-WebSocket-Version",
+	})
 	originsOk := handlers.AllowedOrigins([]string{"*"})
 	methodsOk := handlers.AllowedMethods([]string{"GET", "POST", "OPTIONS"})
 	exposedOk := handlers.ExposedHeaders([]string{"Content-Length"})
