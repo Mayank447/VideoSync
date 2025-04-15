@@ -1,6 +1,8 @@
+const BACKEND_URL = 'http://localhost:8080'; 
+
 async function createSession() {
     try {
-        const response = await fetch('http://localhost:8080/api/sessions', {
+        const response = await fetch(`${BACKEND_URL}/api/sessions`, {
             method: 'POST'
         });
         
@@ -8,18 +10,17 @@ async function createSession() {
         
         const { sessionKey } = await response.json();
         
-        // Display session key
         document.getElementById('sessionKey').textContent = sessionKey;
         document.getElementById('sessionKeyContainer').style.display = 'block';
         
-        // Automatically copy to clipboard
+        // Copy to clipboard
         navigator.clipboard.writeText(sessionKey).then(() => {
             alert('Session key copied to clipboard!');
         });
         
     } catch (error) {
-        console.error('Error creating session:', error);
-        alert('Error creating session. Please try again.');
+        showError('Error creating session. Please try again.');
+        console.error('Create session error:', error);
     }
 }
 
@@ -28,23 +29,33 @@ async function joinSession() {
     const errorElement = document.getElementById('errorMessage');
     
     if (!sessionKey) {
-        errorElement.textContent = 'Please enter a session key';
-        errorElement.style.display = 'block';
+        showError('Please enter a session key');
         return;
     }
 
     try {
-        // Validate session key
-        const response = await fetch(`http://localhost:8080/api/sessions/${sessionKey}/validate`);
+        const response = await fetch(
+            `${BACKEND_URL}/api/sessions/${encodeURIComponent(sessionKey)}/validate`
+        );
         
         if (!response.ok) throw new Error('Invalid session key');
         
-        // Redirect to player page with session key
-        window.location.href = `/pages/video_player.html?sessionKey=${encodeURIComponent(sessionKey)}`;
+        const { valid } = await response.json();
+        if (!valid) throw new Error('Invalid session key');
+        
+        window.location.href = `/pages/player.html?sessionKey=${encodeURIComponent(sessionKey)}`;
         
     } catch (error) {
-        errorElement.textContent = 'Invalid session key. Please check and try again.';
-        errorElement.style.display = 'block';
+        showError('Invalid session key. Please check and try again.');
         console.error('Join error:', error);
     }
+}
+
+function showError(message) {
+    const errorElement = document.getElementById('errorMessage');
+    errorElement.textContent = message;
+    errorElement.style.display = 'block';
+    setTimeout(() => {
+        errorElement.style.display = 'none';
+    }, 3000);
 }
