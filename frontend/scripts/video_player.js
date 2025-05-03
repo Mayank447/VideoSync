@@ -58,13 +58,14 @@ function handleInitialization(data) {
     isHost = data.isHost;
     document.getElementById('userRole').textContent = isHost ? 'Admin' : 'Participant';
     updateControls();
+    attachCustomControlListeners(); // <- Attach buttons only once we know isHost
+
     videoElement.currentTime = data.state.currentTime;
     videoElement.playbackRate = data.state.playbackRate;
     data.state.paused ? videoElement.pause() : videoElement.play();
 }
 
 function handleStateUpdate(data) {
-    console.log('Received state update:', data);
     const serverTime = data.timestamp;
     const localTime = Date.now();
     latency = localTime - serverTime;
@@ -73,59 +74,32 @@ function handleStateUpdate(data) {
     const targetTime = data.state.currentTime + (latency / 2000);
 
     if (Math.abs(currentTime - targetTime) > 0.5) {
-        console.log('Seeking to:', targetTime);
         videoElement.currentTime = targetTime;
     }
 
     if (data.state.paused !== videoElement.paused) {
-        console.log('Updating play state:', data.state.paused ? 'pause' : 'play');
         data.state.paused ? videoElement.pause() : videoElement.play();
     }
 
-    if (videoElement.playbackRate !== data.state.playbackRate) {
-        console.log('Updating playback rate:', data.state.playbackRate);
-        videoElement.playbackRate = data.state.playbackRate;
-    }
+    videoElement.playbackRate = data.state.playbackRate;
 }
 
 function handleHeartbeat() {
-    // Send heartbeat acknowledgment
     ws.send(JSON.stringify({ type: 'heartbeatAck' }));
 }
 
 // Update UI controls
 function updateControls() {
-    const controls = document.querySelectorAll('.controls button, #seekBar');
-    controls.forEach(control => {
-        control.disabled = !isHost;
-    });
-    console.log('Controls updated - Host status:', isHost);
+    const playPauseBtn = document.getElementById('playPauseBtn');
+    const seekBar = document.getElementById('seekBar');
+    playPauseBtn.disabled = !isHost;
+    seekBar.disabled = !isHost;
 }
-
-// Event listeners for video controls
-videoElement.addEventListener('play', () => {
-    console.log('Play event triggered');
-    sendPlayerState('play');
-});
-
-videoElement.addEventListener('pause', () => {
-    console.log('Pause event triggered');
-    sendPlayerState('pause');
-});
-
-videoElement.addEventListener('seeked', () => {
-    console.log('Seek event triggered');
-    sendPlayerState('seek');
-});
 
 // Send player state to backend
 function sendPlayerState(type) {
-    if (!isHost || !ws) {
-        console.log('Not sending state - isHost:', isHost, 'ws connected:', !!ws);
-        return;
-    }
+    if (!isHost || !ws) return;
 
-    console.log('Sending state update:', type);
     const state = {
         type: 'stateUpdate',
         state: {
@@ -139,39 +113,52 @@ function sendPlayerState(type) {
     ws.send(JSON.stringify(state));
 }
 
-// Add click handlers for control buttons
-document.getElementById('playButton').addEventListener('click', () => {
-    if (isHost) {
-        videoElement.play();
-    }
-});
+// Handle DOM video events
+videoElement.addEventListener('play', () => sendPlayerState('play'));
+videoElement.addEventListener('pause', () => sendPlayerState('pause'));
+videoElement.addEventListener('seeked', () => sendPlayerState('seek'));
 
-document.getElementById('pauseButton').addEventListener('click', () => {
-    if (isHost) {
-        videoElement.pause();
-    }
-});
-
-document.getElementById('seekBar').addEventListener('input', (e) => {
-    if (isHost) {
-        videoElement.currentTime = e.target.value;
-    }
-});
-
-// Update seek bar and time display
 videoElement.addEventListener('timeupdate', () => {
     document.getElementById('currentTime').textContent = formatTime(videoElement.currentTime);
     document.getElementById('seekBar').value = videoElement.currentTime;
-    document.getElementById('seekBar').max = videoElement.duration;
 });
 
-// Helper functions
+videoElement.addEventListener('loadedmetadata', () => {
+    document.getElementById('seekBar').max = videoElement.duration;
+    document.getElementById('duration').textContent = formatTime(videoElement.duration);
+});
+
+// Custom button listeners
+function attachCustomControlListeners() {
+    const playPauseBtn = document.getElementById('playPauseBtn');
+    const seekBar = document.getElementById('seekBar');
+
+    playPauseBtn.addEventListener('click', () => {
+        if (!isHost) return;
+        if (videoElement.paused) {
+            videoElement.play();
+            sendPlayerState('play');
+        } else {
+            videoElement.pause();
+            sendPlayerState('pause');
+        }
+    });
+
+    seekBar.addEventListener('input', (e) => {
+        if (!isHost) return;
+        videoElement.currentTime = parseFloat(e.target.value);
+        sendPlayerState('seek');
+    });
+}
+
+// Helper: format time
 function formatTime(seconds) {
     const date = new Date(0);
     date.setSeconds(seconds);
     return date.toISOString().substr(11, 8);
 }
 
+// Status message display
 function setStatus(message, isError) {
     const statusElement = document.getElementById('statusMessage');
     statusElement.textContent = message;
@@ -189,26 +176,21 @@ async function createNewSession() {
         const response = await fetch(`${BACKEND_URL}/api/sessions`, {
             method: 'POST'
         });
-        
+
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
-        
+
         const data = await response.json();
         console.log('Session created:', data);
-        
-        // Store host token in session storage
         sessionStorage.setItem('hostToken', data.hostToken);
-        
-        // Update URL with both session key and host token
+
         const newUrl = new URL(window.location.href);
         newUrl.searchParams.set('sessionKey', data.sessionKey);
         newUrl.searchParams.set('hostToken', data.hostToken);
         window.history.replaceState({}, '', newUrl);
-        
-        // Initialize the session
+
         await initializeSession();
-        
     } catch (error) {
         console.error('Failed to create session:', error);
         setStatus('Failed to create session: ' + error.message, true);
@@ -219,62 +201,51 @@ async function createNewSession() {
 async function initializeSession() {
     try {
         console.log('Initializing session with key:', sessionKey);
-        
-        // Get host token from URL or session storage
+
         const urlHostToken = urlParams.get('hostToken');
         const storedHostToken = sessionStorage.getItem('hostToken');
         const hostToken = urlHostToken || storedHostToken;
-        
-        console.log('Host token from URL:', urlHostToken ? 'present' : 'not present');
-        console.log('Host token from storage:', storedHostToken ? 'present' : 'not present');
 
-        // Create URL with session key in path and host token as query parameter
         const validateUrl = `${BACKEND_URL}/api/sessions/${encodeURIComponent(sessionKey)}/validate`;
         const urlWithParams = hostToken ? `${validateUrl}?hostToken=${encodeURIComponent(hostToken)}` : validateUrl;
-        
+
         console.log('Sending validation request to:', urlWithParams);
-        
         const response = await fetch(urlWithParams);
-        
+
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
-        
+
         const data = await response.json();
         console.log('Session validation response:', data);
-        
+
         if (!data.valid) {
             setStatus('Invalid session key', true);
             return;
         }
 
-        // Update host status
         isHost = data.isHost;
         console.log('User role:', isHost ? 'Host' : 'Participant');
 
-        // If user is host, ensure host token is in URL
         if (isHost && hostToken && !urlHostToken) {
             const newUrl = new URL(window.location.href);
             newUrl.searchParams.set('hostToken', hostToken);
             window.history.replaceState({}, '', newUrl);
         }
 
-        // Connect to streaming server
-        console.log('Connecting to streaming server:', data.streaming_url);
         connectWebSocket(data.streaming_url);
-        
-        // Update session info display
+
         document.getElementById('sessionKeyDisplay').textContent = sessionKey;
         document.getElementById('userRole').textContent = isHost ? 'Admin' : 'Participant';
         updateControls();
-        
+        attachCustomControlListeners();
     } catch (error) {
         console.error('Session initialization error:', error);
         setStatus('Failed to initialize session: ' + error.message, true);
     }
 }
 
-// Start initialization if session key is present, otherwise create new session
+// Entry
 if (sessionKey) {
     console.log('Session key found, starting initialization');
     initializeSession();
