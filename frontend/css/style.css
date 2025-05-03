@@ -79,3 +79,31 @@ button:hover {
     color: #a94442;
     border: 1px solid #ebccd1;
 }
+
+#serverInfo {
+    padding: 0.5rem 1rem;
+    background: #e9ecef;
+    border-radius: 4px;
+    margin: 1rem 0;
+    font-size: 0.9em;
+}
+
+#serverStatus {
+    padding: 0.8rem;
+    background: #f8f9fa;
+    border-radius: 8px;
+    margin: 1rem 0;
+    font-family: monospace;
+}
+
+#hostControls {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: #e9ecef;
+    border-radius: 8px;
+}
+
+#hostControls button {
+    margin-right: 1rem;
+    padding: 0.5rem 1rem;
+}

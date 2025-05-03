@@ -1,151 +1,124 @@
-const BACKEND_URL = 'http://localhost:8080';
-
+const MAIN_SERVER = 'http://localhost:8080';
 const videoElement = document.getElementById('videoPlayer');
 const urlParams = new URLSearchParams(window.location.search);
 const sessionKey = urlParams.get('sessionKey');
-let isHost = false;
+const isHost = urlParams.has('host');
 let ws = null;
-let latency = 0;
 
-// Initialize WebSocket connection
+async function initializeSession() {
+    try {
+        const response = await fetch(`${MAIN_SERVER}/api/sessions/${encodeURIComponent(sessionKey)}`);
+        const sessionData = await response.json();
+        
+        document.getElementById('currentServer').textContent = new URL(sessionData.streaming_url).hostname;
+        document.getElementById('videoSource').src = sessionData.streaming_url; // Directly use the URL
+        videoElement.load(); 
+        
+        connectWebSocket(sessionData.streaming_url);
+
+    } catch (error) {
+        setStatus('Failed to initialize session: ' + error.message, true);
+    }
+}
+
 function connectWebSocket() {
-    ws = new WebSocket(`${BACKEND_URL.replace('http', 'ws')}/ws?sessionKey=${sessionKey}`);
+    const hostToken = sessionStorage.getItem("hostToken");
+    const wsUrl = new URL(`${MAIN_SERVER.replace('http', 'ws')}/ws`);
+    wsUrl.searchParams.set('sessionKey', sessionKey);
+    if (hostToken) {
+        wsUrl.searchParams.set('hostToken', hostToken); // Include hostToken if present
+    }
+    ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-        console.log('WebSocket connected');
         setStatus('Connected to session', false);
-        loadVideo();
+        document.getElementById('sessionKeyDisplay').textContent = sessionKey;
     };
 
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        handleSyncMessage(data);
+        switch(data.type) {
+            case 'init':
+                handleInitialization(data);
+                break;
+            case 'state_update':
+                handleStateUpdate(data);
+                break;
+            case 'server_change':
+                handleServerMigration(data.newUrl);
+                break;
+        }
     };
 
     ws.onclose = () => {
-        console.log('WebSocket disconnected');
-        setStatus('Connection lost - attempting to reconnect...', true);
+        setStatus('Connection lost - reconnecting...', true);
         setTimeout(connectWebSocket, 3000);
     };
-
-    ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setStatus('Connection error', true);
-    };
-}
-
-// Load video from backend
-async function loadVideo() {
-    try {
-        videoElement.src = `${BACKEND_URL}/api/video`;
-        videoElement.load();
-    } catch (error) {
-        console.error('Error loading video:', error);
-        setStatus('Error loading video', true);
-    }
-}
-
-// Handle synchronization messages
-function handleSyncMessage(data) {
-    switch (data.type) {
-        case 'init':
-            handleInitialization(data);
-            break;
-        case 'stateUpdate':
-            handleStateUpdate(data);
-            break;
-        case 'heartbeat':
-            handleHeartbeat(data);
-            break;
-    }
 }
 
 function handleInitialization(data) {
-    isHost = data.isHost;
-    document.getElementById('userRole').textContent = isHost ? 'Host' : 'Participant';
-    updateControls();
-    videoElement.currentTime = data.state.currentTime;
-    videoElement.playbackRate = data.state.playbackRate;
-    data.state.paused ? videoElement.pause() : videoElement.play();
+    if (data.isHost) {
+        document.getElementById('userRole').textContent = 'Host';
+        document.getElementById('hostControls').style.display = 'block';
+        document.querySelectorAll('.host-control').forEach(btn => btn.disabled = false);
+    }
 }
 
 function handleStateUpdate(data) {
     const serverTime = data.timestamp;
-    const localTime = Date.now();
-    latency = localTime - serverTime;
+    const latency = Date.now() - serverTime;
+    document.getElementById('serverLatency').textContent = `${latency}ms`;
 
-    const currentTime = videoElement.currentTime;
-    const targetTime = data.state.currentTime + (latency / 2000);
-
-    if (Math.abs(currentTime - targetTime) > 0.5) {
-        videoElement.currentTime = targetTime;
+    if (Math.abs(videoElement.currentTime - data.state.currentTime) > 0.5) {
+        videoElement.currentTime = data.state.currentTime + (latency / 2000);
     }
 
     if (data.state.paused !== videoElement.paused) {
         data.state.paused ? videoElement.pause() : videoElement.play();
     }
-
-    videoElement.playbackRate = data.state.playbackRate;
 }
 
-function handleHeartbeat() {
-    // Send heartbeat acknowledgment
-    ws.send(JSON.stringify({ type: 'heartbeatAck' }));
+function handleServerMigration(newUrl) {
+    const currentTime = videoElement.currentTime;
+    document.getElementById('videoSource').src = `${newUrl}/video?t=${currentTime}`;
+    document.getElementById('currentServer').textContent = new URL(newUrl).hostname;
+    videoElement.play();
 }
 
-// Update UI controls
-function updateControls() {
-    const controls = document.querySelectorAll('.controls button, #seekBar');
-    controls.forEach(control => {
-        control.disabled = !isHost;
-    });
-}
+document.getElementById('forceSync').addEventListener('click', () => {
+    ws.send(JSON.stringify({
+        type: 'force_sync',
+        currentTime: videoElement.currentTime
+    }));
+});
 
-// Event listeners
-videoElement.addEventListener('play', () => sendPlayerState('play'));
-videoElement.addEventListener('pause', () => sendPlayerState('pause'));
-videoElement.addEventListener('seeked', () => sendPlayerState('seek'));
+document.getElementById('migrateServer').addEventListener('click', async () => {
+    try {
+        const response = await fetch(`${MAIN_SERVER}/api/sessions/${sessionKey}/migrate`, {
+            method: 'POST'
+        });
+        const { newUrl } = await response.json();
+        handleServerMigration(newUrl);
+    } catch (error) {
+        setStatus('Migration failed: ' + error.message, true);
+    }
+});
 
 videoElement.addEventListener('timeupdate', () => {
     document.getElementById('currentTime').textContent = 
-        formatTime(videoElement.currentTime);
+        new Date(videoElement.currentTime * 1000).toISOString().substr(11, 8);
     document.getElementById('seekBar').value = videoElement.currentTime;
 });
-
-// Send player state to backend
-function sendPlayerState(type) {
-    if (!isHost || !ws) return;
-
-    const state = {
-        type: 'stateUpdate',
-        state: {
-            paused: videoElement.paused,
-            currentTime: videoElement.currentTime,
-            playbackRate: videoElement.playbackRate,
-            timestamp: Date.now()
-        }
-    };
-
-    ws.send(JSON.stringify(state));
-}
-
-// Helper functions
-function formatTime(seconds) {
-    const date = new Date(0);
-    date.setSeconds(seconds);
-    return date.toISOString().substr(11, 8);
-}
 
 function setStatus(message, isError) {
     const statusElement = document.getElementById('statusMessage');
     statusElement.textContent = message;
-    statusElement.style.color = isError ? '#D32F2F' : '#388E3C';
+    statusElement.style.color = isError ? '#dc3545' : '#28a745';
     statusElement.style.display = 'block';
-    setTimeout(() => {
-        statusElement.style.display = 'none';
-    }, 3000);
+    setTimeout(() => statusElement.style.display = 'none', 3000);
 }
 
-// Initialization
-document.getElementById('sessionKeyDisplay').textContent = sessionKey;
-connectWebSocket();
+
+
+// Initialize
+initializeSession();

@@ -9,21 +9,23 @@ body {
     position: relative;
     max-width: 800px;
     margin: 2rem auto;
+    background: #000;
+    border-radius: 8px;
+    overflow: hidden;
 }
 
 #videoPlayer {
     width: 100%;
     height: auto;
-    background: #000;
-    border-radius: 8px;
 }
 
 .controls {
     margin-top: 1rem;
+    padding: 1rem;
+    background: white;
     display: flex;
     gap: 1rem;
     align-items: center;
-    flex-wrap: wrap;
 }
 
 button {
@@ -55,4 +57,10 @@ button:disabled {
 .timestamp {
     font-family: monospace;
     font-size: 1.1rem;
+}
+
+#serverLatency {
+    color: #6c757d;
+    font-size: 0.9em;
+    margin-left: 1rem;
 }

@@ -12,10 +12,22 @@
         Role: <span id="userRole">Participant</span>
     </div>
 
+    <div id="serverStatus">
+        <span>Streaming Server: </span>
+        <span id="currentServer">Connecting...</span>
+        <span id="serverLatency"></span>
+    </div>
+
     <div id="videoContainer">
         <video id="videoPlayer" controls>
-            <source src="http://localhost:8080/api/video" type="video/mp4">
+            <source id="videoSource" type="video/mp4">
         </video>
+
+        <div id="hostControls" style="display: none;">
+            <button id="forceSync" class="host-control">Force Sync</button>
+            <button id="migrateServer" class="host-control">Migrate Server</button>
+        </div>
+
         <div class="controls">
             <button id="playPauseBtn" disabled>Play/Pause</button>
             <input type="range" id="seekBar" min="0" value="0" step="1" style="flex-grow: 1;" disabled>
@@ -27,7 +39,6 @@
         <div id="statusMessage"></div>
     </div>
 
-    <script src="../scripts/video_player.js">
-    </script>
+    <script src="../scripts/video_player.js"></script>
 </body>
 </html>
