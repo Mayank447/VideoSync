@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"time"
+
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 )
@@ -22,9 +23,9 @@ type StreamingServer struct {
 }
 
 type ClientConnection struct {
-	conn     *websocket.Conn
+	conn      *websocket.Conn
 	sessionID string
-	isHost   bool
+	isHost    bool
 }
 
 var (
@@ -34,7 +35,7 @@ var (
 	serverPort    = os.Getenv("SERVER_PORT")
 	capacity      = 100 // Default capacity
 
-	clients = make(map[string]*ClientConnection)
+	clients  = make(map[string]*ClientConnection)
 	upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
@@ -44,15 +45,19 @@ var (
 	}
 )
 
+const (
+	videoPath = "../sample.mp4"
+)
+
 func main() {
 	if serverID == "" {
 		serverID = fmt.Sprintf("ss-%d", time.Now().Unix())
 	}
-	if serverURL == "" {
-		serverURL = "http://localhost:8081"
-	}
 	if serverPort == "" {
 		serverPort = "8081"
+	}
+	if serverURL == "" {
+		serverURL = "http://localhost:8081"
 	}
 
 	// Register with main server
@@ -65,7 +70,7 @@ func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/ws", handleWebSocket)
 	r.HandleFunc("/status", handleStatus)
-	r.HandleFunc("/video", handleVideoStream)
+	r.HandleFunc("/api/video", streamVideo).Methods("GET", "HEAD")
 
 	// Start server
 	log.Printf("Streaming server starting on port %s", serverPort)
@@ -142,9 +147,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	isHost := r.URL.Query().Get("isHost") == "true"
 	client := &ClientConnection{
-		conn:     conn,
+		conn:      conn,
 		sessionID: sessionID,
-		isHost:   isHost,
+		isHost:    isHost,
 	}
 
 	clients[sessionID] = client
@@ -200,11 +205,11 @@ func broadcastState(sessionID string, state json.RawMessage) {
 
 func sendInitialState(client *ClientConnection) {
 	client.conn.WriteJSON(map[string]interface{}{
-		"type": "init",
+		"type":   "init",
 		"isHost": client.isHost,
 		"state": map[string]interface{}{
-			"paused":      true,
-			"currentTime": 0,
+			"paused":       true,
+			"currentTime":  0,
 			"playbackRate": 1.0,
 		},
 	})
@@ -217,20 +222,42 @@ func cleanupClient(client *ClientConnection) {
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
-		"id":           serverID,
-		"url":          serverURL,
-		"capacity":     capacity,
-		"currentLoad":  len(clients),
-		"status":       "active",
-		"lastPing":     time.Now().Unix(),
+		"id":          serverID,
+		"url":         serverURL,
+		"capacity":    capacity,
+		"currentLoad": len(clients),
+		"status":      "active",
+		"lastPing":    time.Now().Unix(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
 
-func handleVideoStream(w http.ResponseWriter, r *http.Request) {
-	// TODO: Implement video streaming logic
-	// This will depend on your video source and streaming requirements
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
-} 
+// Video streaming endpoint
+func streamVideo(w http.ResponseWriter, r *http.Request) {
+	// Enhanced CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	// Handle OPTIONS preflight
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Handle range requests properly
+	videoFile, err := os.Open(videoPath)
+	if err != nil {
+		http.Error(w, "Video not found", http.StatusNotFound)
+		log.Printf("Video file missing at: %s", videoPath)
+		return
+	}
+	defer videoFile.Close()
+
+	stat, _ := videoFile.Stat()
+	http.ServeContent(w, r, "video.mp4", stat.ModTime(), videoFile)
+}

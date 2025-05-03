@@ -1,4 +1,5 @@
 const BACKEND_URL = 'http://localhost:8080';
+const STREAMING_URL = ""
 let isHost = false;
 let ws = null;
 let latency = 0;
@@ -233,12 +234,54 @@ async function initializeSession() {
             window.history.replaceState({}, '', newUrl);
         }
 
-        connectWebSocket(data.streaming_url);
+        // After receiving streaming URL
+        const streamingUrl = data.streaming_url;
+        console.log(streamingUrl)
+        
+        // Clear existing sources and create new dynamic source
+        const videoElement = document.getElementById('videoPlayer');
+        videoElement.innerHTML = ''; // Clear any existing sources
+        const source = document.createElement('source');
+        source.src = `${streamingUrl}/api/video`;
+        source.type = 'video/mp4';
+        videoElement.appendChild(source);
+        
+        // Load the new source
+        videoElement.load();
+        videoElement.play().catch(error => {
+            // Show play button if autoplay is blocked
+            if (error.name === 'NotAllowedError') {
+                const playBtn = document.getElementById('playPauseBtn');
+                playBtn.disabled = false;
+                playBtn.textContent = 'Start Playback';
+                setStatus('Click play to start video', false);
+            }
+        });        
 
         document.getElementById('sessionKeyDisplay').textContent = sessionKey;
-        document.getElementById('userRole').textContent = isHost ? 'Admin' : 'Participant';
+        document.getElementById('userRole').textContent = isHost ? 'Host' : 'Participant';
         updateControls();
         attachCustomControlListeners();
+
+        videoElement.addEventListener('error', (e) => {
+            console.error('Video error:', videoElement.error);
+            setStatus(`Video error: ${videoElement.error.message}`, true);
+        });
+
+        videoElement.addEventListener('stalled', () => {
+            setStatus('Video stream stalled - reconnecting...', true);
+            videoElement.load(); // Attempt to reload
+        });
+        
+        videoElement.addEventListener('loadeddata', () => {
+            setStatus('Video stream connected', false);
+            if (isHost) {
+                videoElement.play().catch(e => {
+                    console.log('Autoplay blocked - waiting for user interaction');
+                });
+            }
+        });
+
     } catch (error) {
         console.error('Session initialization error:', error);
         setStatus('Failed to initialize session: ' + error.message, true);
@@ -252,4 +295,12 @@ if (sessionKey) {
 } else {
     console.log('No session key found, creating new session');
     createNewSession();
+}
+
+
+function reloadVideoSource() {
+    const currentTime = videoElement.currentTime;
+    videoElement.src = `${streamingUrl}/api/video?t=${Date.now()}`;
+    videoElement.currentTime = currentTime;
+    videoElement.play();
 }

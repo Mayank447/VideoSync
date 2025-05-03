@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"os"
+	"strings"
 	"sync"
 	"time"
-	"strings"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/gorilla/handlers" // For CORS
@@ -19,7 +19,7 @@ import (
 type Config struct {
 	RedisAddr        string
 	StreamingServers map[string]*StreamingServer
-	mu              sync.RWMutex
+	mu               sync.RWMutex
 }
 
 type ServerMetrics struct {
@@ -39,8 +39,8 @@ var (
 	metrics      = ServerMetrics{
 		Status: "starting",
 	}
-	ctx          = context.Background() // Add global context
-	upgrader     = websocket.Upgrader{
+	ctx      = context.Background() // Add global context
+	upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 		CheckOrigin:     func(r *http.Request) bool { return true },
@@ -53,11 +53,10 @@ var (
 
 var (
 	streamingServers = make(map[string]*StreamingServer)
-	serverMutex     sync.RWMutex
+	serverMutex      sync.RWMutex
 )
 
 const (
-	videoPath     = "./sample.mp4"
 	sessionExpiry = time.Hour * 24
 )
 
@@ -132,10 +131,9 @@ func main() {
 	}).Methods("GET")
 
 	// API routes
+	r.HandleFunc("/ws", handleWebSocket)
 	r.HandleFunc("/api/sessions", createSession).Methods("POST")
 	r.HandleFunc("/api/sessions/{key}/validate", validateSession).Methods("GET")
-	r.HandleFunc("/api/video", streamVideo).Methods("GET", "HEAD")
-	r.HandleFunc("/ws", handleWebSocket)
 	r.HandleFunc("/api/streaming-servers/register", registerStreamingServer).Methods("POST")
 	r.HandleFunc("/api/streaming-servers/heartbeat", handleHeartbeat).Methods("POST")
 
@@ -205,7 +203,7 @@ func createSession(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"sessionKey": sessionKey,
-		"hostToken": hostToken,
+		"hostToken":  hostToken,
 	})
 }
 
@@ -214,7 +212,6 @@ func validateSession(w http.ResponseWriter, r *http.Request) {
 	// print the request
 	log.Printf(r.URL.Path)
 	sessionKey := r.URL.Path[len("/api/sessions/"):]
-	// remove any query params
 	sessionKey = strings.Split(sessionKey, "?")[0]
 	sessionKey = sessionKey[:len(sessionKey)-len("/validate")]
 	hostToken := r.URL.Query().Get("hostToken")
@@ -260,12 +257,18 @@ func validateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	serverURL := server.URL
+	if !strings.HasPrefix(serverURL, "http") {
+		serverURL = "http://" + serverURL
+	}
+	serverURL = strings.TrimSuffix(serverURL, "/")
+
 	log.Printf("Session validated - Key: %s, Is Host: %v, Server: %s", sessionKey, isHost, server.ID)
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"valid":        true,
-		"isHost":       isHost,
-		"streaming_url": server.URL,
+		"valid":         true,
+		"isHost":        isHost,
+		"streaming_url": serverURL, // Send direct video URL
 	})
 }
 
@@ -419,23 +422,6 @@ func heartbeatRoutine(conn *websocket.Conn, done <-chan struct{}) {
 			return
 		}
 	}
-}
-
-// Video streaming endpoint
-func streamVideo(w http.ResponseWriter, r *http.Request) {
-	// Add CORS headers
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD")
-
-	videoFile, err := os.Open(videoPath)
-	if err != nil {
-		http.Error(w, "Video not found", http.StatusNotFound)
-		return
-	}
-	defer videoFile.Close()
-
-	stat, _ := videoFile.Stat()
-	http.ServeContent(w, r, "video.mp4", stat.ModTime(), videoFile)
 }
 
 func broadcastState(sessionKey string, state []byte) {
