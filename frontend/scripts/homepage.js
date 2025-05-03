@@ -8,7 +8,7 @@ async function createSession() {
         
         if (!response.ok) throw new Error('Failed to create session');
         
-        const { sessionKey } = await response.json();
+        const { sessionKey, hostToken } = await response.json();
         const sessionKeyElement = document.getElementById('sessionKey');
         
         // Always display the session key
@@ -47,6 +47,12 @@ async function createSession() {
             sessionKeyElement.select();
         }
         
+        // Store host token in both session storage and URL
+        sessionStorage.setItem('hostToken', hostToken);
+        const newUrl = new URL(window.location.href);
+        newUrl.searchParams.set('hostToken', hostToken);
+        window.history.replaceState({}, '', newUrl);
+        
     } catch (error) {
         console.error('Session creation error:', error);
         showTemporaryMessage('Error creating session. Please try again.', 'error');
@@ -75,9 +81,21 @@ async function joinSession() {
     }
 
     try {
-        const response = await fetch(
-            `${BACKEND_URL}/api/sessions/${encodeURIComponent(sessionKey)}/validate`
-        );
+        console.log('Joining session:', sessionKey);
+        
+        // Get host token from session storage
+        const hostToken = sessionStorage.getItem('hostToken');
+        console.log('Host token from storage:', hostToken ? 'present' : 'not present');
+        
+        // Validate session with host token if available
+        const validateUrl = `${BACKEND_URL}/api/sessions/${encodeURIComponent(sessionKey)}/validate`;
+        const urlWithParams = hostToken ? 
+            `${validateUrl}?hostToken=${encodeURIComponent(hostToken)}` : 
+            validateUrl;
+            
+        console.log('Sending validation request to:', urlWithParams);
+        
+        const response = await fetch(urlWithParams);
         
         if (!response.ok) throw new Error('Invalid session key');
         
