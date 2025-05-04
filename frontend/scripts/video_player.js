@@ -97,79 +97,6 @@ function updateControls() {
     seekBar.disabled = !isHost;
 }
 
-// Send player state to backend
-function sendPlayerState(type) {
-    if (!isHost || !ws) return;
-
-    const state = {
-        type: 'stateUpdate',
-        state: {
-            paused: videoElement.paused,
-            currentTime: videoElement.currentTime,
-            playbackRate: videoElement.playbackRate,
-            timestamp: Date.now()
-        }
-    };
-
-    ws.send(JSON.stringify(state));
-}
-
-// Handle DOM video events
-videoElement.addEventListener('play', () => sendPlayerState('play'));
-videoElement.addEventListener('pause', () => sendPlayerState('pause'));
-videoElement.addEventListener('seeked', () => sendPlayerState('seek'));
-
-videoElement.addEventListener('timeupdate', () => {
-    document.getElementById('currentTime').textContent = formatTime(videoElement.currentTime);
-    document.getElementById('seekBar').value = videoElement.currentTime;
-});
-
-videoElement.addEventListener('loadedmetadata', () => {
-    document.getElementById('seekBar').max = videoElement.duration;
-    document.getElementById('duration').textContent = formatTime(videoElement.duration);
-});
-
-// Custom button listeners
-function attachCustomControlListeners() {
-    const playPauseBtn = document.getElementById('playPauseBtn');
-    const seekBar = document.getElementById('seekBar');
-
-    playPauseBtn.addEventListener('click', () => {
-        if (!isHost) return;
-        if (videoElement.paused) {
-            videoElement.play();
-            sendPlayerState('play');
-        } else {
-            videoElement.pause();
-            sendPlayerState('pause');
-        }
-    });
-
-    seekBar.addEventListener('input', (e) => {
-        if (!isHost) return;
-        videoElement.currentTime = parseFloat(e.target.value);
-        sendPlayerState('seek');
-    });
-}
-
-// Helper: format time
-function formatTime(seconds) {
-    const date = new Date(0);
-    date.setSeconds(seconds);
-    return date.toISOString().substr(11, 8);
-}
-
-// Status message display
-function setStatus(message, isError) {
-    const statusElement = document.getElementById('statusMessage');
-    statusElement.textContent = message;
-    statusElement.style.color = isError ? '#D32F2F' : '#388E3C';
-    statusElement.style.display = 'block';
-    setTimeout(() => {
-        statusElement.style.display = 'none';
-    }, 3000);
-}
-
 // Create new session
 async function createNewSession() {
     try {
@@ -303,4 +230,76 @@ function reloadVideoSource() {
     videoElement.src = `${streamingUrl}/api/video?t=${Date.now()}`;
     videoElement.currentTime = currentTime;
     videoElement.play();
+}
+
+// Handle DOM video events
+videoElement.addEventListener('play', () => sendPlayerState('play'));
+videoElement.addEventListener('pause', () => sendPlayerState('pause'));
+videoElement.addEventListener('seeked', () => sendPlayerState('seek'));
+
+videoElement.addEventListener('timeupdate', () => {
+    document.getElementById('currentTime').textContent = formatTime(videoElement.currentTime);
+    document.getElementById('seekBar').value = videoElement.currentTime;
+});
+
+videoElement.addEventListener('loadedmetadata', () => {
+    document.getElementById('seekBar').max = videoElement.duration;
+    document.getElementById('duration').textContent = formatTime(videoElement.duration);
+});
+
+// Custom button listeners
+function attachCustomControlListeners() {
+    const playPauseBtn = document.getElementById('playPauseBtn');
+    const seekBar = document.getElementById('seekBar');
+
+    playPauseBtn.addEventListener('click', () => {
+        if (!isHost) return;
+        if (videoElement.paused) {
+            videoElement.play();
+        } else {
+            videoElement.pause();
+        }
+    });
+
+    seekBar.addEventListener('input', (e) => {
+        if (!isHost) return;
+        videoElement.currentTime = parseFloat(e.target.value);
+    });
+}
+
+// Helper: format time
+function formatTime(seconds) {
+    const date = new Date(0);
+    date.setSeconds(seconds);
+    return date.toISOString().substr(11, 8);
+}
+
+// Status message display
+function setStatus(message, isError) {
+    const statusElement = document.getElementById('statusMessage');
+    statusElement.textContent = message;
+    statusElement.style.color = isError ? '#D32F2F' : '#388E3C';
+    statusElement.style.display = 'block';
+    setTimeout(() => {
+        statusElement.style.display = 'none';
+    }, 3000);
+}
+
+// Send player state to backend
+function sendPlayerState(type) {
+    if (!isHost || !ws) return;
+    alert(type)
+
+    const video_state = {
+        type: 'stateUpdate',
+        state: {
+            paused: videoElement.paused,
+            currentTime: videoElement.currentTime,
+            playbackRate: videoElement.playbackRate,
+            timestamp: Date.now()
+        }
+    };
+
+    ws.send(JSON.stringify(video_state));
+    console.log("Sent update")
 }

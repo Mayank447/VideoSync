@@ -353,7 +353,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		// Process messages from host only
 		if isHost {
+			log.Printf("Received redis state update")
 			var msg struct {
 				Type      string       `json:"type"`
 				State     SessionState `json:"state"`
@@ -366,7 +368,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if msg.Type == "stateUpdate" {
-				// Update state in Redis with timestamp
+				// Update Redis with timestamped state
+				log.Printf("Received redis state update")
 				stateWithTs := struct {
 					SessionState
 					Timestamp int64 `json:"timestamp"`
@@ -377,7 +380,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 				stateJson, _ := json.Marshal(stateWithTs)
 
-				// Store in Redis with extended expiration
+				// Persist to Redis with session expiry
 				err := rdb.SetEX(ctx,
 					"session:"+sessionKey+":state",
 					stateJson,
@@ -389,7 +392,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 
-				// Broadcast to all clients in session
+				// Broadcast to all session participants
 				broadcastState(sessionKey, stateJson)
 			}
 		}
