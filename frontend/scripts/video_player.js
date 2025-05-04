@@ -290,14 +290,13 @@ function setStatus(message, isError) {
 // Send player state to backend
 function sendPlayerState(type) {
     // console.log(ws)
-    if (!isHost) return;
-    alert(type)
+    if (!isHost || !ws || ws.readyState !== WebSocket.OPEN) return;
 
     const video_state = {
         type: 'stateUpdate',
         state: {
-            sessionKey: sessionStorage.getItem('sessionKey'),
-            hostToken: sessionStorage.getItem('hostToken'),
+            // sessionKey: sessionStorage.getItem('sessionKey'),
+            // hostToken: sessionStorage.getItem('hostToken'),
             paused: videoElement.paused,
             currentTime: videoElement.currentTime,
             playbackRate: videoElement.playbackRate,
@@ -305,15 +304,5 @@ function sendPlayerState(type) {
         }
     };
     ws.send(JSON.stringify(video_state));
-
-    // const response = fetch(`${BACKEND_URL}/api/state_update`, {
-    //     method: 'POST',
-    //     body: JSON.stringify(video_state)
-    // });
-
-    // if (!response.ok) {
-    //     throw new Error(`HTTP error! status: ${response.status}`);
-    // }
-
     // console.log("Sent update")
 }

@@ -135,6 +135,7 @@ func sendHeartbeats() {
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	log.Println(r.URL)
 	sessionID := r.URL.Query().Get("sessionID")
 	if sessionID == "" {
 		http.Error(w, "Missing session ID", http.StatusBadRequest)
@@ -161,6 +162,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
+			log.Println("Error reading message:", err)
 			break
 		}
 
@@ -182,8 +184,9 @@ func handleClientMessage(client *ClientConnection, message []byte) {
 	switch msg.Type {
 	case "stateUpdate":
 		if client.isHost {
+			log.Println(string(msg.State))
 			// Broadcast state to all clients in the session
-			log.Println(msg.State)
+			// log.Println(msg.State)
 			broadcastState(client.sessionID, msg.State)
 		}
 	case "heartbeat":
