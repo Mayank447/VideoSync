@@ -67,6 +67,7 @@ function handleInitialization(data) {
 }
 
 function handleStateUpdate(data) {
+    console.log(data)
     const serverTime = data.timestamp;
     const localTime = Date.now();
     latency = localTime - serverTime;

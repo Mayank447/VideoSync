@@ -269,7 +269,7 @@ func handleClientMessage(client *ClientConnection, message []byte) {
 				publishStateUpdate(client.sessionID, msg.State)
 
 				// Also broadcast directly to connected clients on this server
-				broadcastState(client.sessionID, msg.State)
+				// broadcastState(client.sessionID, msg.State)
 			}
 		}
 	case "heartbeat":
