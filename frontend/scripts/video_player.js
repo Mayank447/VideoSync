@@ -306,3 +306,5 @@ function sendPlayerState(type) {
     ws.send(JSON.stringify(video_state));
     // console.log("Sent update")
 }
+
+// When playing the video for the first time through the host, send a play sync as host can join whenever.

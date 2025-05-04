@@ -8,9 +8,10 @@ import (
 	"net/http"
 	"os"
 	"time"
-
+	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	"context"
 )
 
 type StreamingServer struct {
@@ -44,6 +45,8 @@ var (
 			return true // Allow all origins for now
 		},
 	}
+
+	rdb          *redis.Client
 )
 
 const (
@@ -51,7 +54,22 @@ const (
 	HEARTBEAT_INTERVAL = 30
 )
 
+var ctx = context.Background()
+
 func main() {
+
+	rdb = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
+	})
+
+	pong, err := rdb.Ping(ctx).Result()
+       if err != nil {
+           log.Fatalf("Could not connect to Redis: %v", err)
+       }
+	fmt.Println(pong, "Connected to Redis")
+
 	if serverID == "" {
 		serverID = fmt.Sprintf("ss-%d", time.Now().Unix())
 	}
@@ -187,7 +205,26 @@ func handleClientMessage(client *ClientConnection, message []byte) {
 			log.Println(string(msg.State))
 			// Broadcast state to all clients in the session
 			// log.Println(msg.State)
-			broadcastState(client.sessionID, msg.State)
+			
+			type State struct {
+				CurrentTime  float64 `json:"currentTime"`
+				Paused       bool    `json:"paused"`
+				PlaybackRate float64 `json:"playbackRate"`
+				Timestamp time.Time `json:"timestamp"`
+			}
+
+			var ctx = context.Background()
+			val, err := rdb.Get(ctx, "session:"+client.sessionID+":state").Result()
+			
+			if err == redis.Nil {
+				log.Printf("Invalid Session key %s \n", client.sessionID)
+			} else if err != nil {
+				log.Println("Error Synchronizing")
+			}
+
+			
+			
+			// broadcastState(client.sessionID, msg.State)
 		}
 	case "heartbeat":
 		// Send heartbeat acknowledgment

@@ -21,7 +21,7 @@ type SessionState struct {
 	Paused       bool    `json:"paused"`
 	CurrentTime  float64 `json:"currentTime"`
 	PlaybackRate float64 `json:"playbackRate"`
-	Timestamp	 time.Time    `json:"lastUpdateUTCTimestamp"`
+	Timestamp	 time.Time    `json:"timestamp"`
 }
 
 type Config struct {
@@ -189,7 +189,7 @@ func createSession(w http.ResponseWriter, r *http.Request) {
 		Paused:       true,
 		CurrentTime:  0,
 		PlaybackRate: 1.0,
-		Timestamp: time.Now().UTC(),
+		Timestamp: time.Now().Unix(),
 	}
 	stateJson, _ := json.Marshal(initialState)
 	err = rdb.SetEX(ctx, "session:"+sessionKey+":state", stateJson, sessionExpiry).Err()
