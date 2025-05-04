@@ -29,6 +29,7 @@ type ClientConnection struct {
 }
 
 var (
+	// [TODO] Get the below 4 param through command line
 	mainServerURL = "http://localhost:8080"
 	serverID      = os.Getenv("SERVER_ID")
 	serverURL     = os.Getenv("SERVER_URL")
@@ -47,6 +48,7 @@ var (
 
 const (
 	videoPath = "../sample.mp4"
+	HEARTBEAT_INTERVAL = 30
 )
 
 func main() {
@@ -68,7 +70,7 @@ func main() {
 
 	// Setup routes
 	r := mux.NewRouter()
-	r.HandleFunc("/ws", handleWebSocket)
+	r.HandleFunc("/ws", handleWebSocket) // [TODO]
 	r.HandleFunc("/status", handleStatus)
 	r.HandleFunc("/api/video", streamVideo).Methods("GET", "HEAD")
 
@@ -106,7 +108,7 @@ func registerWithMainServer() {
 }
 
 func sendHeartbeats() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(HEARTBEAT_INTERVAL * time.Second)
 	for range ticker.C {
 		server := StreamingServer{
 			ID:          serverID,
@@ -155,9 +157,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	clients[sessionID] = client
 	defer cleanupClient(client)
 
-	// Send initial state
-	sendInitialState(client)
-
 	// Handle messages
 	for {
 		_, message, err := conn.ReadMessage()
@@ -204,17 +203,6 @@ func broadcastState(sessionID string, state json.RawMessage) {
 	}
 }
 
-func sendInitialState(client *ClientConnection) {
-	client.conn.WriteJSON(map[string]interface{}{
-		"type":   "init",
-		"isHost": client.isHost,
-		"state": map[string]interface{}{
-			"paused":       true,
-			"currentTime":  0,
-			"playbackRate": 1.0,
-		},
-	})
-}
 
 func cleanupClient(client *ClientConnection) {
 	client.conn.Close()
@@ -231,8 +219,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		"lastPing":    time.Now().Unix(),
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	respondJSON(w, http.StatusOK, status)
 }
 
 // Video streaming endpoint
@@ -261,4 +248,18 @@ func streamVideo(w http.ResponseWriter, r *http.Request) {
 
 	stat, _ := videoFile.Stat()
 	http.ServeContent(w, r, "video.mp4", stat.ModTime(), videoFile)
+}
+
+/////////////////////////////////////// HELPER FUNCTIONS //////////////////////////////////////////////////////////////
+
+func respondJSON(w http.ResponseWriter, statusCode int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(data)
+}
+
+func respondError(w http.ResponseWriter, statusCode int, errorMessage string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(map[string]string{"error": errorMessage})
 }
