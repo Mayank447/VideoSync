@@ -67,9 +67,9 @@ function handleInitialization(data) {
 }
 
 function handleStateUpdate(data) {
-    console.log(data)
-    const serverTime = data.timestamp;
+    const serverTime = data.servertime;
     const localTime = Date.now();
+
     latency = localTime - serverTime;
 
     const currentTime = videoElement.currentTime;

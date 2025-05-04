@@ -29,7 +29,9 @@ type ClientConnection struct {
 	conn      *websocket.Conn
 	sessionID string
 	isHost    bool
+	send      chan []byte
 }
+
 
 type RedisState struct {
 	Paused       bool    `json:"paused"`
@@ -189,6 +191,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		isHost:    isHost,
 	}
 
+
+	
+	client.send = make(chan []byte, 256)
+	go client.writePump()
+
+
 	// Initialize mutex for this session if it doesn't exist
 	if _, exists := client_lock[sessionID]; !exists {
 		client_lock[sessionID] = &sync.Mutex{}
@@ -214,6 +222,23 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		handleClientMessage(client, message)
+	}
+}
+
+func (c *ClientConnection) writePump() {
+	for {
+		msg, ok := <-c.send
+		if !ok {
+			// Channel closed, close the WebSocket
+			c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
+		}
+
+		err := c.conn.WriteMessage(websocket.TextMessage, msg)
+		if err != nil {
+			log.Println("writePump error:", err)
+			return
+		}
 	}
 }
 
@@ -299,22 +324,40 @@ func broadcastState(sessionID string, state json.RawMessage) {
 		if client == nil || client.conn == nil {
 			continue
 		}
-
-		err := client.conn.WriteJSON(map[string]interface{}{
+	
+		payload, err := json.Marshal(map[string]interface{}{
 			"type":  "stateUpdate",
 			"state": state,
+			"servertime": time.Now().UnixMilli(),
 		})
 		if err != nil {
-			log.Printf("Error broadcasting to client: %v", err)
-			// Don't attempt to remove the client here - it will be handled by the connection handler
+			log.Printf("Error marshaling broadcast state: %v", err)
+			return
 		}
+	
+		for _, client := range clientsToSend {
+			if client == nil || client.conn == nil {
+				continue
+			}
+			select {
+			case client.send <- payload:
+			default:
+				log.Printf("Dropping message to client in session %s (send buffer full)", sessionID)
+			}
+		}
+	
 	}
+	
 }
 
 func cleanupClient(client *ClientConnection) {
 	if client == nil || client.sessionID == "" {
 		return
 	}
+	if client.send != nil {
+		close(client.send)
+	}
+	
 
 	if _, exists := client_lock[client.sessionID]; !exists {
 		client_lock[client.sessionID] = &sync.Mutex{}
