@@ -10,7 +10,7 @@ import (
 	"os"
 	"sync"
 	"time"
-
+	"flag"
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -74,6 +74,9 @@ const (
 var ctx = context.Background()
 
 func main() {
+	portFlag := flag.String("port", "", "Port number for the server to run on")
+	flag.Parse()
+
 	rdb = redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
 		Password: "",
@@ -89,12 +92,15 @@ func main() {
 	if serverID == "" {
 		serverID = fmt.Sprintf("ss-%d", time.Now().Unix())
 	}
-	if serverPort == "" {
+	if *portFlag != "" {
+		serverPort = *portFlag
+	} else if serverPort == "" {
 		serverPort = "8081"
 	}
 	if serverURL == "" {
-		serverURL = "http://localhost:8081"
+		serverURL = "http://localhost:" + serverPort
 	}
+
 
 	// Register with main server
 	registerWithMainServer()
