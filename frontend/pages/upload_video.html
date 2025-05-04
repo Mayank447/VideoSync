@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="../css/video_upload.css">
+    <title>Video Upload - SyncStream</title>
+</head>
+<body>
+    <h1>Upload Video</h1>
+    
+    <div class="drop-zone" id="dropZone">
+        <p>Drag and drop video files here</p>
+        <p>or</p>
+        <button class="upload-btn" onclick="document.getElementById('fileInput').click()">
+            Select File
+        </button>
+        <input type="file" id="fileInput" accept="video/*" hidden>
+    </div>
+
+    <video id="preview" controls></video>
+    
+    <div class="progress-container">
+        <div class="progress-bar" id="progressBar"></div>
+    </div>
+    
+    <div id="status"></div>
+    <script src="../scripts/video_upload.js">
+    </script>
+</body>
+</html>
