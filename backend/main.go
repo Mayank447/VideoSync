@@ -13,7 +13,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/handlers" // For CORS
 	"github.com/gorilla/mux"
-	"github.com/gorilla/websocket"
 )
 
 // STruct and Global Variables for Redis
@@ -25,17 +24,13 @@ type SessionState struct {
 }
 
 type Config struct {
-	RedisAddr        string
 	StreamingServers map[string]*StreamingServer
 	mu               sync.RWMutex
 }
 
 var (
-	cfg = Config{
-		RedisAddr:        "localhost:6379",
-		StreamingServers: make(map[string]*StreamingServer),
-	}
-	rdb *redis.Client
+	rdb    *redis.Client
+	pubsub *redis.PubSub
 )
 
 // STructs and Global Variable for Streaming Server
@@ -59,6 +54,7 @@ type ServerMetrics struct {
 var (
 	streamingServers = make(map[string]*StreamingServer)
 	serverMutex      sync.RWMutex
+	ctx              = context.Background() // Add global context
 )
 
 var (
@@ -66,20 +62,6 @@ var (
 	metrics      = ServerMetrics{
 		Status: "starting",
 	}
-)
-
-// Global Variables for Websocket
-var (
-	ctx      = context.Background() // Add global context
-	upgrader = websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-		CheckOrigin:     func(r *http.Request) bool { return true },
-	}
-	connections = struct {
-		sync.Mutex
-		m map[string][]*websocket.Conn
-	}{m: make(map[string][]*websocket.Conn)}
 )
 
 // Gloabl Consts

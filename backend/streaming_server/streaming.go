@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -24,17 +25,17 @@ type StreamingServer struct {
 	LastPing    int64
 }
 
+type ClientConnection struct {
+	conn      *websocket.Conn
+	sessionID string
+	isHost    bool
+}
+
 type RedisState struct {
 	Paused       bool    `json:"paused"`
 	CurrentTime  float64 `json:"currentTime"`
 	PlaybackRate float64 `json:"playbackRate"`
 	Timestamp    int64   `json:"timestamp"`
-}
-
-type ClientConnection struct {
-	conn      *websocket.Conn
-	sessionID string
-	isHost    bool
 }
 
 var (
@@ -45,7 +46,11 @@ var (
 	serverPort    = os.Getenv("SERVER_PORT")
 	capacity      = 100 // Default capacity
 
-	clients  = make(map[string]*ClientConnection)
+	clients         = make(map[string][]*ClientConnection)
+	client_lock     = make(map[string]*sync.Mutex)
+	numClients      = 0
+	numClients_lock = &sync.Mutex{}
+
 	upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
@@ -54,7 +59,8 @@ var (
 		},
 	}
 
-	rdb *redis.Client
+	rdb    *redis.Client
+	pubsub *redis.PubSub
 )
 
 const (
@@ -66,7 +72,6 @@ const (
 var ctx = context.Background()
 
 func main() {
-
 	rdb = redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
 		Password: "",
@@ -137,14 +142,16 @@ func registerWithMainServer() {
 func sendHeartbeats() {
 	ticker := time.NewTicker(HEARTBEAT_INTERVAL * time.Second)
 	for range ticker.C {
+		numClients_lock.Lock()
 		server := StreamingServer{
 			ID:          serverID,
 			URL:         serverURL,
 			Capacity:    capacity,
-			CurrentLoad: len(clients),
+			CurrentLoad: numClients,
 			Status:      "active",
 			LastPing:    time.Now().Unix(),
 		}
+		numClients_lock.Unlock()
 
 		jsonData, err := json.Marshal(server)
 		if err != nil {
@@ -182,8 +189,21 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		isHost:    isHost,
 	}
 
-	clients[sessionID] = client
+	// Initialize mutex for this session if it doesn't exist
+	if _, exists := client_lock[sessionID]; !exists {
+		client_lock[sessionID] = &sync.Mutex{}
+	}
+
+	client_lock[sessionID].Lock()
+	clients[sessionID] = append(clients[sessionID], client)
+	client_lock[sessionID].Unlock()
+
+	numClients_lock.Lock()
+	numClients += 1
+	numClients_lock.Unlock()
 	defer cleanupClient(client)
+
+	subscribeToSessionUpdates(sessionID)
 
 	// Handle messages
 	for {
@@ -211,10 +231,7 @@ func handleClientMessage(client *ClientConnection, message []byte) {
 	switch msg.Type {
 	case "stateUpdate":
 		if client.isHost {
-			log.Println(string(msg.State))
-			// Broadcast state to all clients in the session
-			// log.Println(msg.State)
-
+			// log.Println(string(msg.State))
 			var ctx = context.Background()
 			val, err := rdb.Get(ctx, "session:"+client.sessionID+":state").Result()
 
@@ -223,8 +240,6 @@ func handleClientMessage(client *ClientConnection, message []byte) {
 			} else if err != nil {
 				log.Println("Error Synchronizing")
 			}
-
-			log.Println(val)
 
 			// Define a struct to hold the state with a timestamp
 			stateFromRedis := RedisState{}
@@ -249,9 +264,13 @@ func handleClientMessage(client *ClientConnection, message []byte) {
 				if err != nil {
 					log.Println("Error updating state in Redis:", err)
 				}
-			}
 
-			// broadcastState(client.sessionID, msg.State)
+				// Publish the state update to all clients in this session
+				publishStateUpdate(client.sessionID, msg.State)
+
+				// Also broadcast directly to connected clients on this server
+				broadcastState(client.sessionID, msg.State)
+			}
 		}
 	case "heartbeat":
 		// Send heartbeat acknowledgment
@@ -260,19 +279,71 @@ func handleClientMessage(client *ClientConnection, message []byte) {
 }
 
 func broadcastState(sessionID string, state json.RawMessage) {
-	for _, client := range clients {
-		if client.sessionID == sessionID {
-			client.conn.WriteJSON(map[string]interface{}{
-				"type":  "stateUpdate",
-				"state": state,
-			})
+	if _, exists := client_lock[sessionID]; !exists {
+		client_lock[sessionID] = &sync.Mutex{}
+	}
+
+	client_lock[sessionID].Lock()
+	// Check if the session exists in the clients map
+	sessionClients, exists := clients[sessionID]
+	if !exists || len(sessionClients) == 0 {
+		client_lock[sessionID].Unlock()
+		return
+	}
+
+	clientsToSend := make([]*ClientConnection, len(sessionClients))
+	copy(clientsToSend, sessionClients)
+	client_lock[sessionID].Unlock()
+
+	for _, client := range clientsToSend {
+		if client == nil || client.conn == nil {
+			continue
+		}
+
+		err := client.conn.WriteJSON(map[string]interface{}{
+			"type":  "stateUpdate",
+			"state": state,
+		})
+		if err != nil {
+			log.Printf("Error broadcasting to client: %v", err)
+			// Don't attempt to remove the client here - it will be handled by the connection handler
 		}
 	}
 }
 
 func cleanupClient(client *ClientConnection) {
-	client.conn.Close()
-	delete(clients, client.sessionID)
+	if client == nil || client.sessionID == "" {
+		return
+	}
+
+	if _, exists := client_lock[client.sessionID]; !exists {
+		client_lock[client.sessionID] = &sync.Mutex{}
+	}
+
+	client_lock[client.sessionID].Lock()
+	sessionClients, exists := clients[client.sessionID]
+	if !exists || len(sessionClients) == 0 {
+		client_lock[client.sessionID].Unlock()
+		return
+	}
+
+	for i, c := range sessionClients {
+		if c == client {
+			// Safely close the connection
+			if client.conn != nil {
+				client.conn.Close()
+			}
+
+			// Remove the client from the slice
+			clients[client.sessionID] = append(sessionClients[:i], sessionClients[i+1:]...)
+			break
+		}
+	}
+	client_lock[client.sessionID].Unlock()
+
+	numClients_lock.Lock()
+	numClients -= 1
+	numClients_lock.Unlock()
 }
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -280,7 +351,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		"id":          serverID,
 		"url":         serverURL,
 		"capacity":    capacity,
-		"currentLoad": len(clients),
+		"currentLoad": numClients,
 		"status":      "active",
 		"lastPing":    time.Now().Unix(),
 	}
@@ -314,6 +385,54 @@ func streamVideo(w http.ResponseWriter, r *http.Request) {
 
 	stat, _ := videoFile.Stat()
 	http.ServeContent(w, r, "video.mp4", stat.ModTime(), videoFile)
+}
+
+// ///////////////////////////////////// PUBSUB FUNCTIONS //////////////////////////////////////////////////////////////
+func publishStateUpdate(sessionID string, state json.RawMessage) {
+	ctx := context.Background()
+	payload, err := json.Marshal(state)
+	if err != nil {
+		log.Println("Error marshaling state for publish:", err)
+		return
+	}
+
+	err = rdb.Publish(ctx, "session-updates:"+sessionID, string(payload)).Err()
+	if err != nil {
+		log.Println("Error publishing state update:", err)
+	}
+}
+
+func subscribeToSessionUpdates(sessionID string) {
+	ctx := context.Background()
+	pubsub = rdb.Subscribe(ctx, "session-updates:"+sessionID)
+
+	go func() {
+		for {
+			msg, err := pubsub.ReceiveMessage(ctx)
+			if err != nil {
+				log.Println("Error receiving message:", err)
+				continue
+			}
+
+			// Process received message
+			handleSessionUpdate(msg.Channel, msg.Payload)
+		}
+	}()
+}
+
+// Handle session updates received from Redis pub/sub
+func handleSessionUpdate(channel, payload string) {
+	// Extract sessionID from channel
+	sessionID := channel[len("session-updates:"):]
+	log.Printf("Received update for session %s: %s", sessionID, payload)
+
+	var state json.RawMessage
+	err := json.Unmarshal([]byte(payload), &state)
+	if err != nil {
+		log.Println("Error unmarshaling state:", err)
+		return
+	}
+	broadcastState(sessionID, state)
 }
 
 /////////////////////////////////////// HELPER FUNCTIONS //////////////////////////////////////////////////////////////

@@ -72,7 +72,7 @@ function handleStateUpdate(data) {
     latency = localTime - serverTime;
 
     const currentTime = videoElement.currentTime;
-    const targetTime = data.state.currentTime + (latency / 2000);
+    const targetTime = data.state.currentTime + (latency / 1000);
 
     if (Math.abs(currentTime - targetTime) > 0.5) {
         videoElement.currentTime = targetTime;
