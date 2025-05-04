@@ -2,16 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"time"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
-	"context"
 )
 
 type StreamingServer struct {
@@ -21,6 +22,13 @@ type StreamingServer struct {
 	CurrentLoad int
 	Status      string
 	LastPing    int64
+}
+
+type RedisState struct {
+	Paused       bool    `json:"paused"`
+	CurrentTime  float64 `json:"currentTime"`
+	PlaybackRate float64 `json:"playbackRate"`
+	Timestamp    int64   `json:"timestamp"`
 }
 
 type ClientConnection struct {
@@ -46,12 +54,13 @@ var (
 		},
 	}
 
-	rdb          *redis.Client
+	rdb *redis.Client
 )
 
 const (
-	videoPath = "../sample.mp4"
+	videoPath          = "../sample.mp4"
 	HEARTBEAT_INTERVAL = 30
+	REDIS_MSG_EXPIRY   = 24 * time.Hour
 )
 
 var ctx = context.Background()
@@ -65,9 +74,9 @@ func main() {
 	})
 
 	pong, err := rdb.Ping(ctx).Result()
-       if err != nil {
-           log.Fatalf("Could not connect to Redis: %v", err)
-       }
+	if err != nil {
+		log.Fatalf("Could not connect to Redis: %v", err)
+	}
 	fmt.Println(pong, "Connected to Redis")
 
 	if serverID == "" {
@@ -205,25 +214,43 @@ func handleClientMessage(client *ClientConnection, message []byte) {
 			log.Println(string(msg.State))
 			// Broadcast state to all clients in the session
 			// log.Println(msg.State)
-			
-			type State struct {
-				CurrentTime  float64 `json:"currentTime"`
-				Paused       bool    `json:"paused"`
-				PlaybackRate float64 `json:"playbackRate"`
-				Timestamp time.Time `json:"timestamp"`
-			}
 
 			var ctx = context.Background()
 			val, err := rdb.Get(ctx, "session:"+client.sessionID+":state").Result()
-			
+
 			if err == redis.Nil {
 				log.Printf("Invalid Session key %s \n", client.sessionID)
 			} else if err != nil {
 				log.Println("Error Synchronizing")
 			}
 
-			
-			
+			log.Println(val)
+
+			// Define a struct to hold the state with a timestamp
+			stateFromRedis := RedisState{}
+			stateFromMsg := RedisState{}
+
+			// Unmarshal the state from Redis
+			if err := json.Unmarshal([]byte(val), &stateFromRedis); err != nil {
+				log.Println("Error unmarshaling state from Redis:", err)
+				return
+			}
+
+			// Unmarshal the state from the message
+			if err := json.Unmarshal(msg.State, &stateFromMsg); err != nil {
+				log.Println("Error unmarshaling state from message:", err)
+				return
+			}
+
+			// Compare the timestamps
+			if stateFromMsg.Timestamp > stateFromRedis.Timestamp {
+				stateJson, _ := json.Marshal(msg.State)
+				err := rdb.SetEX(ctx, "session:"+client.sessionID+":state", stateJson, REDIS_MSG_EXPIRY).Err()
+				if err != nil {
+					log.Println("Error updating state in Redis:", err)
+				}
+			}
+
 			// broadcastState(client.sessionID, msg.State)
 		}
 	case "heartbeat":
@@ -242,7 +269,6 @@ func broadcastState(sessionID string, state json.RawMessage) {
 		}
 	}
 }
-
 
 func cleanupClient(client *ClientConnection) {
 	client.conn.Close()

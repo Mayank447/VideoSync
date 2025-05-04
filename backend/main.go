@@ -21,7 +21,7 @@ type SessionState struct {
 	Paused       bool    `json:"paused"`
 	CurrentTime  float64 `json:"currentTime"`
 	PlaybackRate float64 `json:"playbackRate"`
-	Timestamp	 time.Time    `json:"timestamp"`
+	Timestamp    int64   `json:"timestamp"`
 }
 
 type Config struct {
@@ -35,7 +35,7 @@ var (
 		RedisAddr:        "localhost:6379",
 		StreamingServers: make(map[string]*StreamingServer),
 	}
-	rdb          *redis.Client
+	rdb *redis.Client
 )
 
 // STructs and Global Variable for Streaming Server
@@ -189,7 +189,7 @@ func createSession(w http.ResponseWriter, r *http.Request) {
 		Paused:       true,
 		CurrentTime:  0,
 		PlaybackRate: 1.0,
-		Timestamp: time.Now().Unix(),
+		Timestamp:    time.Now().Unix(),
 	}
 	stateJson, _ := json.Marshal(initialState)
 	err = rdb.SetEX(ctx, "session:"+sessionKey+":state", stateJson, sessionExpiry).Err()
@@ -345,7 +345,6 @@ func cleanupInactiveServers() {
 		serverMutex.Unlock()
 	}
 }
-
 
 /////////////////////////////////////// HELPER FUNCTIONS //////////////////////////////////////////////////////////////
 
