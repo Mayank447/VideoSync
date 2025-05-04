@@ -1,7 +1,7 @@
 const BACKEND_URL = 'http://localhost:8080';
 const STREAMING_URL = ""
 let isHost = false;
-let ws = null;
+// let ws = null;
 let latency = 0;
 
 const videoElement = document.getElementById('videoPlayer');
@@ -125,7 +125,7 @@ async function createNewSession() {
     }
 }
 
-// Initialize session
+// Join session
 async function initializeSession() {
     try {
         console.log('Initializing session with key:', sessionKey);
@@ -164,6 +164,8 @@ async function initializeSession() {
         // After receiving streaming URL
         const streamingUrl = data.streaming_url;
         console.log(streamingUrl)
+
+        connectWebSocket(streamingUrl);
         
         // Clear existing sources and create new dynamic source
         const videoElement = document.getElementById('videoPlayer');
@@ -287,19 +289,31 @@ function setStatus(message, isError) {
 
 // Send player state to backend
 function sendPlayerState(type) {
-    if (!isHost || !ws) return;
+    // console.log(ws)
+    if (!isHost) return;
     alert(type)
 
     const video_state = {
         type: 'stateUpdate',
         state: {
+            sessionKey: sessionStorage.getItem('sessionKey'),
+            hostToken: sessionStorage.getItem('hostToken'),
             paused: videoElement.paused,
             currentTime: videoElement.currentTime,
             playbackRate: videoElement.playbackRate,
             timestamp: Date.now()
         }
     };
-
     ws.send(JSON.stringify(video_state));
-    console.log("Sent update")
+
+    // const response = fetch(`${BACKEND_URL}/api/state_update`, {
+    //     method: 'POST',
+    //     body: JSON.stringify(video_state)
+    // });
+
+    // if (!response.ok) {
+    //     throw new Error(`HTTP error! status: ${response.status}`);
+    // }
+
+    // console.log("Sent update")
 }

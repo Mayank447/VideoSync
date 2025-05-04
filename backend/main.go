@@ -16,10 +16,37 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// STruct and Global Variables for Redis
+type SessionState struct {
+	Paused       bool    `json:"paused"`
+	CurrentTime  float64 `json:"currentTime"`
+	PlaybackRate float64 `json:"playbackRate"`
+	Timestamp	 time.Time    `json:"lastUpdateUTCTimestamp"`
+}
+
 type Config struct {
 	RedisAddr        string
 	StreamingServers map[string]*StreamingServer
 	mu               sync.RWMutex
+}
+
+var (
+	cfg = Config{
+		RedisAddr:        "localhost:6379",
+		StreamingServers: make(map[string]*StreamingServer),
+	}
+	rdb          *redis.Client
+)
+
+// STructs and Global Variable for Streaming Server
+type StreamingServer struct {
+	ID          string    `json:"id"`
+	URL         string    `json:"url"`
+	Capacity    int       `json:"capacity"`
+	CurrentLoad int       `json:"currentLoad"`
+	Status      string    `json:"status"`
+	LastPing    int64     `json:"lastPing"`
+	Registered  time.Time `json:"registered"`
 }
 
 type ServerMetrics struct {
@@ -30,15 +57,19 @@ type ServerMetrics struct {
 }
 
 var (
-	cfg = Config{
-		RedisAddr:        "localhost:6379",
-		StreamingServers: make(map[string]*StreamingServer),
-	}
-	rdb          *redis.Client
+	streamingServers = make(map[string]*StreamingServer)
+	serverMutex      sync.RWMutex
+)
+
+var (
 	sessionMutex = &sync.Mutex{}
 	metrics      = ServerMetrics{
 		Status: "starting",
 	}
+)
+
+// Global Variables for Websocket
+var (
 	ctx      = context.Background() // Add global context
 	upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
@@ -51,30 +82,10 @@ var (
 	}{m: make(map[string][]*websocket.Conn)}
 )
 
-var (
-	streamingServers = make(map[string]*StreamingServer)
-	serverMutex      sync.RWMutex
-)
-
+// Gloabl Consts
 const (
 	sessionExpiry = time.Hour * 24
 )
-
-type SessionState struct {
-	Paused       bool    `json:"paused"`
-	CurrentTime  float64 `json:"currentTime"`
-	PlaybackRate float64 `json:"playbackRate"`
-}
-
-type StreamingServer struct {
-	ID          string    `json:"id"`
-	URL         string    `json:"url"`
-	Capacity    int       `json:"capacity"`
-	CurrentLoad int       `json:"currentLoad"`
-	Status      string    `json:"status"`
-	LastPing    int64     `json:"lastPing"`
-	Registered  time.Time `json:"registered"`
-}
 
 func main() {
 	// Initialize Redis
@@ -86,8 +97,6 @@ func main() {
 
 	// Create router
 	r := mux.NewRouter()
-
-	// Health Check endpoint
 
 	// Add error recovery middleware
 	r.Use(func(next http.Handler) http.Handler {
@@ -110,16 +119,6 @@ func main() {
 		})
 	})
 
-	// Health check endpoint
-	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Health check request from %s", r.RemoteAddr)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"status": "ok",
-			"time":   time.Now().String(),
-		})
-	}).Methods("GET")
-
 	// Root endpoint
 	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Root request from %s", r.RemoteAddr)
@@ -131,11 +130,12 @@ func main() {
 	}).Methods("GET")
 
 	// API routes
-	r.HandleFunc("/ws", handleWebSocket)
+	r.HandleFunc("/ws", handleWebSocket) // [TO KNOW]
 	r.HandleFunc("/api/sessions", createSession).Methods("POST")
 	r.HandleFunc("/api/sessions/{key}/validate", validateSession).Methods("GET")
 	r.HandleFunc("/api/streaming-servers/register", registerStreamingServer).Methods("POST")
 	r.HandleFunc("/api/streaming-servers/heartbeat", handleHeartbeat).Methods("POST")
+	// TODO - Reassign clients
 
 	// Start server
 	log.Println("Starting server on :8080")
@@ -167,6 +167,8 @@ func createSession(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Creating new session - Key: %s, Host Token: %s", sessionKey, hostToken)
 
+	// [TODO] Check whether the sessionKey, hostToken already exists or not
+
 	// Store session
 	err := rdb.SetEX(ctx, "session:"+sessionKey, "active", sessionExpiry).Err()
 	if err != nil {
@@ -188,6 +190,7 @@ func createSession(w http.ResponseWriter, r *http.Request) {
 		Paused:       true,
 		CurrentTime:  0,
 		PlaybackRate: 1.0,
+		Timestamp: time.Now().UTC(),
 	}
 	stateJson, _ := json.Marshal(initialState)
 	err = rdb.SetEX(ctx, "session:"+sessionKey+":state", stateJson, sessionExpiry).Err()
@@ -270,6 +273,78 @@ func validateSession(w http.ResponseWriter, r *http.Request) {
 		"isHost":        isHost,
 		"streaming_url": serverURL, // Send direct video URL
 	})
+}
+
+func getLeastLoadedServer() *StreamingServer {
+	serverMutex.RLock()
+	defer serverMutex.RUnlock()
+
+	var bestServer *StreamingServer
+	lowestLoad := float64(1.0)
+
+	for _, server := range streamingServers {
+		if server.Status != "active" {
+			continue
+		}
+		load := float64(server.CurrentLoad) / float64(server.Capacity)
+		if load < lowestLoad {
+			lowestLoad = load
+			bestServer = server
+		}
+	}
+
+	return bestServer
+}
+
+func registerStreamingServer(w http.ResponseWriter, r *http.Request) {
+	var server StreamingServer
+	if err := json.NewDecoder(r.Body).Decode(&server); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	server.Registered = time.Now()
+	server.LastPing = time.Now().Unix()
+
+	serverMutex.Lock()
+	streamingServers[server.ID] = &server
+	serverMutex.Unlock()
+
+	log.Printf("Registered streaming server: %s", server.ID)
+	w.WriteHeader(http.StatusOK)
+}
+
+func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	var server StreamingServer
+	if err := json.NewDecoder(r.Body).Decode(&server); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	serverMutex.Lock()
+	if existingServer, exists := streamingServers[server.ID]; exists {
+		existingServer.CurrentLoad = server.CurrentLoad
+		existingServer.LastPing = time.Now().Unix()
+		existingServer.Status = "active"
+	}
+	serverMutex.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func cleanupInactiveServers() {
+	ticker := time.NewTicker(1 * time.Minute)
+	for range ticker.C {
+		serverMutex.Lock()
+		now := time.Now().Unix()
+		for id, server := range streamingServers {
+			if now-server.LastPing > 60 { // Remove servers inactive for more than 1 minute
+				delete(streamingServers, id)
+				log.Printf("Removed inactive streaming server: %s", id)
+			}
+		}
+		serverMutex.Unlock()
+	}
 }
 
 // WebSocket handler
@@ -482,77 +557,9 @@ func cleanupConnection(conn *websocket.Conn) {
 	}
 }
 
-func registerStreamingServer(w http.ResponseWriter, r *http.Request) {
-	var server StreamingServer
-	if err := json.NewDecoder(r.Body).Decode(&server); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
 
-	server.Registered = time.Now()
-	server.LastPing = time.Now().Unix()
 
-	serverMutex.Lock()
-	streamingServers[server.ID] = &server
-	serverMutex.Unlock()
 
-	log.Printf("Registered streaming server: %s", server.ID)
-	w.WriteHeader(http.StatusOK)
-}
-
-func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
-	var server StreamingServer
-	if err := json.NewDecoder(r.Body).Decode(&server); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	serverMutex.Lock()
-	if existingServer, exists := streamingServers[server.ID]; exists {
-		existingServer.CurrentLoad = server.CurrentLoad
-		existingServer.LastPing = time.Now().Unix()
-		existingServer.Status = "active"
-	}
-	serverMutex.Unlock()
-
-	w.WriteHeader(http.StatusOK)
-}
-
-func getLeastLoadedServer() *StreamingServer {
-	serverMutex.RLock()
-	defer serverMutex.RUnlock()
-
-	var bestServer *StreamingServer
-	lowestLoad := float64(1.0)
-
-	for _, server := range streamingServers {
-		if server.Status != "active" {
-			continue
-		}
-		load := float64(server.CurrentLoad) / float64(server.Capacity)
-		if load < lowestLoad {
-			lowestLoad = load
-			bestServer = server
-		}
-	}
-
-	return bestServer
-}
-
-func cleanupInactiveServers() {
-	ticker := time.NewTicker(1 * time.Minute)
-	for range ticker.C {
-		serverMutex.Lock()
-		now := time.Now().Unix()
-		for id, server := range streamingServers {
-			if now-server.LastPing > 60 { // Remove servers inactive for more than 1 minute
-				delete(streamingServers, id)
-				log.Printf("Removed inactive streaming server: %s", id)
-			}
-		}
-		serverMutex.Unlock()
-	}
-}
 
 func respondJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")

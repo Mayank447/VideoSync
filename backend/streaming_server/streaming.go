@@ -184,6 +184,7 @@ func handleClientMessage(client *ClientConnection, message []byte) {
 	case "stateUpdate":
 		if client.isHost {
 			// Broadcast state to all clients in the session
+			log.Println(msg.State)
 			broadcastState(client.sessionID, msg.State)
 		}
 	case "heartbeat":
