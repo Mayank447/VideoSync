@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"sync"
 	"time"
-	"flag"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -31,7 +32,6 @@ type ClientConnection struct {
 	isHost    bool
 	send      chan []byte
 }
-
 
 type RedisState struct {
 	Paused       bool    `json:"paused"`
@@ -74,9 +74,6 @@ const (
 var ctx = context.Background()
 
 func main() {
-	portFlag := flag.String("port", "", "Port number for the server to run on")
-	flag.Parse()
-
 	rdb = redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
 		Password: "",
@@ -87,7 +84,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Could not connect to Redis: %v", err)
 	}
-	fmt.Println(pong, "Connected to Redis")
+	log.Println(pong, "Connected to Redis")
+
+	portFlag := flag.String("port", "", "Port to run the server on")
+	flag.Parse()
 
 	if serverID == "" {
 		serverID = fmt.Sprintf("ss-%d", time.Now().Unix())
@@ -97,10 +97,10 @@ func main() {
 	} else if serverPort == "" {
 		serverPort = "8081"
 	}
+
 	if serverURL == "" {
 		serverURL = "http://localhost:" + serverPort
 	}
-
 
 	// Register with main server
 	registerWithMainServer()
@@ -197,11 +197,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		isHost:    isHost,
 	}
 
-
-	
 	client.send = make(chan []byte, 256)
 	go client.writePump()
-
 
 	// Initialize mutex for this session if it doesn't exist
 	if _, exists := client_lock[sessionID]; !exists {
@@ -219,6 +216,38 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	subscribeToSessionUpdates(sessionID)
 
+	// Send the initial state to the client
+	if !client.isHost {
+		if client != nil && client.conn != nil {
+			ctx := context.Background()
+			val, err := rdb.Get(ctx, "session:"+client.sessionID+":state").Result()
+
+			if err == redis.Nil {
+				log.Printf("Invalid Session key %s \n", client.sessionID)
+			} else if err != nil {
+				log.Println("Error Synchronizing")
+			}
+
+			var state json.RawMessage
+			err = json.Unmarshal([]byte(val), &state)
+			if err != nil {
+				log.Println("Error unmarshaling state:", err)
+				return
+			}
+
+			payload, err := json.Marshal(map[string]interface{}{
+				"type":       "stateUpdate",
+				"state":      state,
+				"servertime": time.Now().UnixMilli(),
+			})
+
+			select {
+			case client.send <- payload:
+			default:
+				log.Printf("Dropping message to client in session %s (send buffer full)", sessionID)
+			}
+		}
+	}
 	// Handle messages
 	for {
 		_, message, err := conn.ReadMessage()
@@ -309,53 +338,6 @@ func handleClientMessage(client *ClientConnection, message []byte) {
 	}
 }
 
-func broadcastState(sessionID string, state json.RawMessage) {
-	if _, exists := client_lock[sessionID]; !exists {
-		client_lock[sessionID] = &sync.Mutex{}
-	}
-
-	client_lock[sessionID].Lock()
-	// Check if the session exists in the clients map
-	sessionClients, exists := clients[sessionID]
-	if !exists || len(sessionClients) == 0 {
-		client_lock[sessionID].Unlock()
-		return
-	}
-
-	clientsToSend := make([]*ClientConnection, len(sessionClients))
-	copy(clientsToSend, sessionClients)
-	client_lock[sessionID].Unlock()
-
-	for _, client := range clientsToSend {
-		if client == nil || client.conn == nil {
-			continue
-		}
-	
-		payload, err := json.Marshal(map[string]interface{}{
-			"type":  "stateUpdate",
-			"state": state,
-			"servertime": time.Now().UnixMilli(),
-		})
-		if err != nil {
-			log.Printf("Error marshaling broadcast state: %v", err)
-			return
-		}
-	
-		for _, client := range clientsToSend {
-			if client == nil || client.conn == nil {
-				continue
-			}
-			select {
-			case client.send <- payload:
-			default:
-				log.Printf("Dropping message to client in session %s (send buffer full)", sessionID)
-			}
-		}
-	
-	}
-	
-}
-
 func cleanupClient(client *ClientConnection) {
 	if client == nil || client.sessionID == "" {
 		return
@@ -363,7 +345,6 @@ func cleanupClient(client *ClientConnection) {
 	if client.send != nil {
 		close(client.send)
 	}
-	
 
 	if _, exists := client_lock[client.sessionID]; !exists {
 		client_lock[client.sessionID] = &sync.Mutex{}
@@ -482,6 +463,53 @@ func handleSessionUpdate(channel, payload string) {
 		return
 	}
 	broadcastState(sessionID, state)
+}
+
+func broadcastState(sessionID string, state json.RawMessage) {
+	if _, exists := client_lock[sessionID]; !exists {
+		client_lock[sessionID] = &sync.Mutex{}
+	}
+
+	client_lock[sessionID].Lock()
+	// Check if the session exists in the clients map
+	sessionClients, exists := clients[sessionID]
+	if !exists || len(sessionClients) == 0 {
+		client_lock[sessionID].Unlock()
+		return
+	}
+
+	clientsToSend := make([]*ClientConnection, len(sessionClients))
+	copy(clientsToSend, sessionClients)
+	client_lock[sessionID].Unlock()
+
+	for _, client := range clientsToSend {
+		if client == nil || client.conn == nil {
+			continue
+		}
+
+		payload, err := json.Marshal(map[string]interface{}{
+			"type":       "stateUpdate",
+			"state":      state,
+			"servertime": time.Now().UnixMilli(),
+		})
+		if err != nil {
+			log.Printf("Error marshaling broadcast state: %v", err)
+			return
+		}
+
+		for _, client := range clientsToSend {
+			if client == nil || client.conn == nil {
+				continue
+			}
+			select {
+			case client.send <- payload:
+			default:
+				log.Printf("Dropping message to client in session %s (send buffer full)", sessionID)
+			}
+		}
+
+	}
+
 }
 
 /////////////////////////////////////// HELPER FUNCTIONS //////////////////////////////////////////////////////////////
