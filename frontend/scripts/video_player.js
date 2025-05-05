@@ -1,5 +1,5 @@
 const BACKEND_URL = 'http://localhost:8080';
-const STREAMING_URL = ""
+let STREAMING_URL = ""
 let isHost = false;
 let ws = null;
 let latency = 0;
@@ -11,6 +11,7 @@ const sessionKey = urlParams.get('sessionKey');
 let chunkDuration = 0;
 let chunkCount = 0;
 let videoDuration = 0;
+let mediaSourceInitialized = false;
 
 // Create new session
 async function createNewSession() {
@@ -77,9 +78,31 @@ async function initializeSession() {
         }
 
         // After receiving streaming URL
-        const streamingUrl = data.streaming_url;
-        console.log(streamingUrl)
-        connectWebSocket(streamingUrl);
+        STREAMING_URL = data.streaming_url;
+        console.log(STREAMING_URL)
+        connectWebSocket(STREAMING_URL);
+
+        const player = videojs('videoPlayer', {
+            controls: true,
+            autoplay: false,
+            muted: false,
+
+            fluid: true,
+            aspectRatio: '16:9',
+        });
+        
+        // Video.js's built-in HLS handler will choose native vs MSE automatically:
+        player.src({
+            src: `${STREAMING_URL}/hls/${sessionKey}/master.m3u8`,
+            type: 'application/vnd.apple.mpegurl'
+        });
+        
+        // once the player is ready, start playback
+        player.ready(() => {
+            player.play().catch(e => {
+                console.log('Autoplay blocked – waiting for user gesture');
+            });
+        });
 
         document.getElementById('sessionKeyDisplay').textContent = sessionKey;
         document.getElementById('userRole').textContent = isHost ? 'Host' : 'Participant';
@@ -124,13 +147,12 @@ function connectWebSocket(streamingUrl) {
     ws.onopen = () => {
         console.log('WebSocket connected');
         setStatus('Connected to session', false);
-        // Request video metadata once connection is established
-        getVideoMetadata();
+        getVideoMetadata()// Request video metadata once connection is established
     };
 
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        handleSyncMessage(data);
+        handleStreamingServerMessage(data);
     };
 
     ws.onclose = () => {
@@ -145,18 +167,7 @@ function connectWebSocket(streamingUrl) {
     };
 }
 
-function handleInitialization(data) {
-    isHost = data.isHost;
-    document.getElementById('userRole').textContent = isHost ? 'Admin' : 'Participant';
-    updateControls();
-    attachCustomControlListeners(); // <- Attach buttons only once we know isHost
-
-    videoElement.currentTime = data.state.currentTime;
-    videoElement.playbackRate = data.state.playbackRate;
-    data.state.paused ? videoElement.pause() : videoElement.play();
-}
-
-function handleSyncMessage(data) {
+function handleStreamingServerMessage(data) {
     switch (data.type) {
         case 'init':
             handleInitialization(data);
@@ -173,70 +184,23 @@ function handleSyncMessage(data) {
     }
 }
 
+function handleInitialization(data) {
+    isHost = data.isHost;
+    document.getElementById('userRole').textContent = isHost ? 'Admin' : 'Participant';
+    updateControls();
+    attachCustomControlListeners(); // <- Attach buttons only once we know isHost
+
+    videoElement.currentTime = data.state.currentTime;
+    videoElement.playbackRate = data.state.playbackRate;
+    data.state.paused ? videoElement.pause() : videoElement.play();
+}
+
 function handleVideoMetadata(data) {
     console.log('Video metadata:', data.state);
     chunkDuration = data.state.chunkDuration;
     chunkCount = data.state.chunkCount;
     videoDuration = data.state.videoDuration;
     videoFileType = data.state.videoFileType;
-    
-    // Get streaming URL from the window
-    const streamingUrl = ws.url.replace('ws://', 'http://').replace('/ws', '');
-    
-    // Create MediaSource
-    const mediaSource = new MediaSource();
-    videoElement.src = URL.createObjectURL(mediaSource);
-    
-    mediaSource.addEventListener('sourceopen', async () => {
-        // Use correct MIME type for MP4 files
-        const mimeCodec = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
-        
-        // Check if the browser supports this MIME type
-        if (!MediaSource.isTypeSupported(mimeCodec)) {
-            console.error('Browser does not support this MIME type:', mimeCodec);
-            setStatus('Your browser does not support this video format', true);
-            return;
-        }
-
-        try{
-            mediaSource.duration = videoDuration;
-            console.log("Setting video duration to:", videoDuration);
-            triggerLoadedMetadata();
-        } catch (e) {
-            console.error('Error setting up MediaSource:', e);
-            setStatus('Error setting up video player', true);
-        }
-        
-        // try {
-        //     const sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
-        //     mediaSource.duration = videoDuration;
-            
-        //     // Function to load and append chunks
-        //     loadInitialChunks(sourceBuffer, streamingUrl);
-            
-        //     // Set up monitoring for continuous loading
-        //     setupChunkBuffering(sourceBuffer, streamingUrl);
-        // } catch (e) {
-        //     console.error('Error setting up MediaSource:', e);
-        //     setStatus('Error setting up video player', true);
-        // }
-    });
-}
-
-// Send player state to backend
-function sendPlayerState(type) {
-    if (!isHost || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-    const video_state = {
-        type: 'stateUpdate',
-        state: {
-            paused: videoElement.paused,
-            currentTime: videoElement.currentTime,
-            playbackRate: videoElement.playbackRate,
-            timestamp: Date.now()
-        }
-    };
-    ws.send(JSON.stringify(video_state));
 }
 
 function handleStateUpdate(data) {
@@ -263,6 +227,22 @@ function handleHeartbeat() {
     ws.send(JSON.stringify({ type: 'heartbeatAck' }));
 }
 
+// Send player state to backend
+function sendPlayerState(type) {
+    if (!isHost || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const video_state = {
+        type: 'stateUpdate',
+        state: {
+            paused: videoElement.paused,
+            currentTime: videoElement.currentTime,
+            playbackRate: videoElement.playbackRate,
+            timestamp: Date.now()
+        }
+    };
+    ws.send(JSON.stringify(video_state));
+}
+
 function getVideoMetadata() {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         // WebSocket not ready, set timeout to retry
@@ -271,7 +251,6 @@ function getVideoMetadata() {
         return;
     }
     
-    // WebSocket is open, send request
     console.log("Requesting video metadata");
     ws.send(JSON.stringify({ type: 'videoMetadata' }));
 }
@@ -339,85 +318,6 @@ if (sessionKey) {
     createNewSession();
 }
 
-///////////////////////////////// CHUNK BUFFERING //////////////////////////////////
-// Load first 3 chunks to buffer
-async function loadInitialChunks(sourceBuffer, streamingUrl) {
-    for (let i = 1; i <= 3; i++) {
-        await fetchAndAppendChunk(i, sourceBuffer, streamingUrl);
-    }
-    
-    // Start playback after initial chunks are loaded
-    videoElement.play().catch(e => {
-        console.log('Autoplay prevented:', e);
-    });
-}
-
-// Keep loading chunks to maintain at least 3 chunks ahead
-function setupChunkBuffering(sourceBuffer, streamingUrl) {
-    videoElement.addEventListener('timeupdate', () => {
-        const currentChunk = Math.floor(videoElement.currentTime / chunkDuration) + 1;
-        const bufferedChunks = getBufferedChunks();
-        
-        // Always try to keep 3 chunks ahead
-        for (let i = 0; i < 3; i++) {
-            const chunkToLoad = currentChunk + i;
-            if (chunkToLoad <= chunkCount && !bufferedChunks.includes(chunkToLoad)) {
-                fetchAndAppendChunk(chunkToLoad, sourceBuffer, streamingUrl);
-            }
-        }
-    });
-}
-
-// Helper to fetch and append a chunk
-async function fetchAndAppendChunk(chunkIndex, sourceBuffer, streamingUrl) {
-    // Format chunkId with leading zeros (001, 002, etc.)
-    const chunkId = String(chunkIndex).padStart(3, '0');
-    
-    try {
-        const response = await fetch(`${streamingUrl}/api/video/${chunkId}`);
-        const arrayBuffer = await response.arrayBuffer();
-        
-        // Wait if the source buffer is updating
-        await waitForSourceBuffer(sourceBuffer);
-        
-        // Append the chunk data
-        sourceBuffer.appendBuffer(arrayBuffer);
-        console.log(`Appended chunk ${chunkId}`);
-        
-        return new Promise(resolve => {
-            sourceBuffer.addEventListener('updateend', () => resolve(), {once: true});
-        });
-    } catch (e) {
-        console.error(`Error loading chunk ${chunkId}:`, e);
-    }
-}
-
-function waitForSourceBuffer(sourceBuffer) {
-    return new Promise(resolve => {
-        if (!sourceBuffer.updating) {
-            resolve();
-        } else {
-            sourceBuffer.addEventListener('updateend', () => resolve(), {once: true});
-        }
-    });
-}
-
-function getBufferedChunks() {
-    const bufferedChunks = [];
-    for (let i = 0; i < videoElement.buffered.length; i++) {
-        const start = videoElement.buffered.start(i);
-        const end = videoElement.buffered.end(i);
-        
-        const startChunk = Math.floor(start / chunkDuration) + 1;
-        const endChunk = Math.floor(end / chunkDuration) + 1;
-        
-        for (let j = startChunk; j <= endChunk; j++) {
-            bufferedChunks.push(j);
-        }
-    }
-    return bufferedChunks;
-}
-
 ///////////////////////////////// Helper functions //////////////////////////////////
 function formatTime(seconds) {
     const date = new Date(0);
@@ -428,4 +328,60 @@ function formatTime(seconds) {
 function triggerLoadedMetadata() {
     const event = new Event('loadedmetadata');
     videoElement.dispatchEvent(event);
+}
+
+///////////////////////////////// HLS Player //////////////////////////////////
+function setupHLSPlayer(sessionId) {
+    if (Hls.isSupported()) {
+        const hls = new Hls({
+            maxBufferLength: 30,
+            maxMaxBufferLength: 600,
+            maxBufferSize: 60 * 1000 * 1000,
+        });
+        
+        const hlsUrl = `${STREAMING_URL}/hls/${sessionId}/master.m3u8`;
+        console.log(`Loading HLS stream from: ${hlsUrl}`);
+        
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(videoElement);
+        
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            console.log("HLS manifest parsed, attempting to play");
+            videoElement.play().catch(err => {
+                console.log("Autoplay prevented:", err);
+                setStatus("Click play to start video", false);
+            });
+        });
+        
+        hls.on(Hls.Events.ERROR, (event, data) => {
+            console.error("HLS error:", data);
+            if (data.fatal) {
+                switch(data.type) {
+                    case Hls.ErrorTypes.NETWORK_ERROR:
+                        console.log("Network error, attempting to recover");
+                        hls.startLoad();
+                        break;
+                    case Hls.ErrorTypes.MEDIA_ERROR:
+                        console.log("Media error, attempting to recover");
+                        hls.recoverMediaError();
+                        break;
+                    default:
+                        console.error("Fatal HLS error, destroying player");
+                        hls.destroy();
+                        setStatus("Playback error - please refresh", true);
+                        break;
+                }
+            }
+        });
+    } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+        // For Safari, which has native HLS support
+        videoElement.src = `${streamingUrl}/hls/${sessionId}/master.m3u8`;
+        videoElement.addEventListener('loadedmetadata', () => {
+            videoElement.play().catch(err => {
+                console.log("Autoplay prevented:", err);
+            });
+        });
+    } else {
+        setStatus("Your browser doesn't support HLS playback", true);
+    }
 }

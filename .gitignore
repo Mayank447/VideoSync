@@ -4,6 +4,8 @@
 
 # Video files
 .mp4
+.ts
+hls/
 
 # Binaries for programs and plugins
 *.exe

@@ -9,10 +9,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 )
@@ -72,12 +75,28 @@ var (
 	pubsub *redis.PubSub
 )
 
+// HLS directory structure
 const (
-	videoPath          = "../chunks/chunk_001.mp4"
+	HLS_BASE_DIR       = "../hls"
+	HLS_PLAYLIST_NAME  = "playlist.m3u8"
+	HLS_SEGMENT_DIR    = "segments"
+	HLS_MASTER_NAME    = "master.m3u8"
 	HEARTBEAT_INTERVAL = 30
 	REDIS_MSG_EXPIRY   = 24 * time.Hour
 	CHUNK_DURATION     = 5
 )
+
+// Add quality variant definitions
+var qualityVariants = []struct {
+	Name       string
+	Resolution string
+	Bandwidth  int
+	Directory  string
+}{
+	{"720p", "1280x720", 2800000, "720p"},
+	{"480p", "854x480", 1400000, "480p"},
+	{"360p", "640x360", 800000, "360p"},
+}
 
 var ctx = context.Background()
 
@@ -93,6 +112,9 @@ func main() {
 		log.Fatalf("Could not connect to Redis: %v", err)
 	}
 	log.Println(pong, "Connected to Redis")
+
+	// Initialize HLS system
+	initHLS()
 
 	portFlag := flag.String("port", "", "Port to run the server on")
 	flag.Parse()
@@ -118,14 +140,26 @@ func main() {
 
 	// Setup routes
 	r := mux.NewRouter()
-	r.HandleFunc("/ws", handleWebSocket) // [TODO]
+	r.HandleFunc("/ws", handleWebSocket)
 	r.HandleFunc("/status", handleStatus)
-	r.HandleFunc("/api/video", streamVideo).Methods("GET", "HEAD")
-	r.HandleFunc("/api/video/{chunkID}", streamVideoChunk).Methods("GET", "HEAD", "OPTIONS")
 
-	// Start server
+	// HLS routes
+	r.HandleFunc("/hls/{sessionID}/master.m3u8", serveHLSMasterPlaylist).Methods("GET", "OPTIONS")
+	r.HandleFunc("/hls/{sessionID}/playlist.m3u8", serveHLSMediaPlaylist).Methods("GET", "OPTIONS")
+	r.HandleFunc("/hls/{sessionID}/{quality}/playlist.m3u8", serveHLSQualityPlaylist).Methods("GET", "OPTIONS")
+	r.HandleFunc("/hls/{sessionID}/{segmentName}", serveHLSSegment).Methods("GET", "OPTIONS")
+	r.HandleFunc("/hls/{sessionID}/{quality}/{segmentName}", serveHLSQualitySegment).Methods("GET", "OPTIONS")
+
+	// Wrap the router with Gorilla's CORS handler:
+	corsHandler := handlers.CORS(
+		handlers.AllowedOrigins([]string{"*"}),
+		handlers.AllowedMethods([]string{"GET", "OPTIONS"}),
+		handlers.AllowedHeaders([]string{"Content-Type", "Range"}),
+		handlers.ExposedHeaders([]string{"Content-Length", "Content-Range", "Accept-Ranges"}),
+	)(r)
+
 	log.Printf("Streaming server starting on port %s", serverPort)
-	log.Fatal(http.ListenAndServe(":"+serverPort, r))
+	log.Fatal(http.ListenAndServe(":"+serverPort, corsHandler))
 }
 
 func registerWithMainServer() {
@@ -418,59 +452,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, status)
 }
 
-// ///////////////////////////////////// VIDEO CHUNK FUNCTIONS //////////////////////////////////////////////////////////////
-
-func streamVideo(w http.ResponseWriter, r *http.Request) {
-	// Enhanced CORS headers
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
-	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Accept-Ranges", "bytes")
-
-	// Handle OPTIONS preflight
-	if r.Method == "OPTIONS" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	// Handle range requests properly
-	videoFile, err := os.Open(videoPath)
-	if err != nil {
-		http.Error(w, "Video not found", http.StatusNotFound)
-		log.Printf("Video file missing at: %s", videoPath)
-		return
-	}
-	defer videoFile.Close()
-
-	stat, _ := videoFile.Stat()
-	http.ServeContent(w, r, "video.mp4", stat.ModTime(), videoFile)
-}
-
-func streamVideoChunk(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	chunkID := vars["chunkID"]
-
-	chunkPath := fmt.Sprintf("../chunks/chunk_%s.mp4", chunkID)
-
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
-	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Accept-Ranges", "bytes")
-
-	videoFile, err := os.Open(chunkPath)
-	if err != nil {
-		http.Error(w, "Chunk not found", http.StatusNotFound)
-		return
-	}
-	defer videoFile.Close()
-
-	stat, _ := videoFile.Stat()
-	http.ServeContent(w, r, fmt.Sprintf("chunk_%s.mp4", chunkID), stat.ModTime(), videoFile)
-}
-
-// ///////////////////////////////////// PUBSUB FUNCTIONS //////////////////////////////////////////////////////////////
+// ////////////////////////////////////// PUBSUB FUNCTIONS //////////////////////////////////////////////////////////////
 func publishStateUpdate(sessionID string, state json.RawMessage) {
 	ctx := context.Background()
 	payload, err := json.Marshal(state)
@@ -576,4 +558,165 @@ func respondError(w http.ResponseWriter, statusCode int, errorMessage string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(map[string]string{"error": errorMessage})
+}
+
+// ///////////////////////////////////// HLS FUNCTIONS //////////////////////////////////////////////////////////////
+func initHLS() {
+	// Create base HLS directory if it doesn't exist
+	if _, err := os.Stat(HLS_BASE_DIR); err != nil {
+		if os.IsNotExist(err) {
+			log.Fatalf("HLS base directory doesn't exist: %v", err)
+		}
+	}
+
+	log.Println("HLS system initialized")
+}
+
+// Handle CORS preflight requests
+func handleCORS(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Origin, Accept")
+}
+
+// Serve HLS master playlist (contains multiple quality variants)
+func serveHLSMasterPlaylist(w http.ResponseWriter, r *http.Request) {
+	handleCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	vars := mux.Vars(r)
+	sessionID := vars["sessionID"]
+
+	// Check if the master playlist file exists
+	masterPath := filepath.Join(HLS_BASE_DIR, HLS_MASTER_NAME)
+	if _, err := os.Stat(masterPath); err == nil {
+		// Master playlist exists, serve it
+		http.ServeFile(w, r, masterPath)
+		log.Printf("Served existing master playlist for session %s", sessionID)
+		return
+	}
+
+	// Serve the newly generated master playlist
+	http.ServeFile(w, r, masterPath)
+}
+
+// Serve HLS media playlist (contains segment info)
+func serveHLSMediaPlaylist(w http.ResponseWriter, r *http.Request) {
+	handleCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	vars := mux.Vars(r)
+	sessionID := vars["sessionID"]
+
+	playlistPath := filepath.Join(HLS_BASE_DIR, HLS_PLAYLIST_NAME)
+	// Check if playlist exists
+	if _, err := os.Stat(playlistPath); os.IsNotExist(err) {
+		http.Error(w, "Playlist not found", http.StatusNotFound)
+		return
+	}
+
+	// Read the playlist content
+	playlistContent, err := os.ReadFile(playlistPath)
+	if err != nil {
+		http.Error(w, "Error reading playlist", http.StatusInternalServerError)
+		log.Printf("Error reading playlist for session %s: %v", sessionID, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(playlistContent)
+
+	log.Printf("Served media playlist for session %s", sessionID)
+}
+
+// Add a quality-specific playlist handler
+func serveHLSQualityPlaylist(w http.ResponseWriter, r *http.Request) {
+	handleCORS(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	vars := mux.Vars(r)
+	sessionID := vars["sessionID"]
+	quality := vars["quality"]
+
+	playlistPath := filepath.Join(HLS_BASE_DIR, quality, HLS_PLAYLIST_NAME)
+
+	// Check if playlist exists
+	if _, err := os.Stat(playlistPath); os.IsNotExist(err) {
+		http.Error(w, "Quality playlist not found", http.StatusNotFound)
+		return
+	}
+
+	// Read the playlist content
+	http.ServeFile(w, r, playlistPath)
+	log.Printf("Served %s playlist for session %s", quality, sessionID)
+}
+
+// Serve HLS segment
+func serveHLSSegment(w http.ResponseWriter, r *http.Request) {
+	handleCORS(w)
+	log.Println("Serving segment")
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	vars := mux.Vars(r)
+	sessionID := vars["sessionID"]
+	segmentName := vars["segmentName"]
+
+	// Validate segment name to prevent directory traversal
+	if strings.Contains(segmentName, "..") || strings.Contains(segmentName, "/") {
+		http.Error(w, "Invalid segment name", http.StatusBadRequest)
+		return
+	}
+
+	segmentPath := filepath.Join(HLS_BASE_DIR, HLS_SEGMENT_DIR, segmentName)
+	log.Printf("Serving segment %s for session %s", segmentPath, sessionID)
+	// Check if segment exists
+	if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+		http.Error(w, "Segment not found", http.StatusNotFound)
+		return
+	}
+
+	// Serve the segment file
+	http.ServeFile(w, r, segmentPath)
+	log.Printf("Served segment %s for session %s", segmentName, sessionID)
+}
+
+// Add a quality-specific segment handler
+func serveHLSQualitySegment(w http.ResponseWriter, r *http.Request) {
+	handleCORS(w)
+	log.Println("Serving quality segment")
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	vars := mux.Vars(r)
+	sessionID := vars["sessionID"]
+	quality := vars["quality"]
+	segmentName := vars["segmentName"]
+
+	// Validate segment name to prevent directory traversal
+	if strings.Contains(segmentName, "..") || strings.Contains(segmentName, "/") {
+		http.Error(w, "Invalid segment name", http.StatusBadRequest)
+		return
+	}
+
+	segmentPath := filepath.Join(HLS_BASE_DIR, quality, segmentName)
+	log.Printf("Serving segment %s for session %s", segmentPath, sessionID)
+	// Check if segment exists
+	if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+		http.Error(w, "Quality segment not found", http.StatusNotFound)
+		return
+	}
+
+	// Serve the segment file
+	http.ServeFile(w, r, segmentPath)
+	log.Printf("Served %s segment %s for session %s", quality, segmentName, sessionID)
 }
