@@ -1,102 +1,16 @@
 const BACKEND_URL = 'http://localhost:8080';
 const STREAMING_URL = ""
 let isHost = false;
-// let ws = null;
+let ws = null;
 let latency = 0;
 
 const videoElement = document.getElementById('videoPlayer');
 const urlParams = new URLSearchParams(window.location.search);
 const sessionKey = urlParams.get('sessionKey');
 
-// Initialize WebSocket connection
-function connectWebSocket(streamingUrl) {
-    const wsUrl = new URL(`${streamingUrl.replace('http', 'ws')}/ws`);
-    wsUrl.searchParams.set('sessionID', sessionKey);
-    if (isHost) {
-        wsUrl.searchParams.set('isHost', 'true');
-    }
-
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-        console.log('WebSocket connected');
-        setStatus('Connected to session', false);
-    };
-
-    ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        handleSyncMessage(data);
-    };
-
-    ws.onclose = () => {
-        console.log('WebSocket disconnected');
-        setStatus('Connection lost - attempting to reconnect...', true);
-        setTimeout(() => connectWebSocket(streamingUrl), 3000);
-    };
-
-    ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setStatus('Connection error', true);
-    };
-}
-
-// Handle synchronization messages
-function handleSyncMessage(data) {
-    switch (data.type) {
-        case 'init':
-            handleInitialization(data);
-            break;
-        case 'stateUpdate':
-            handleStateUpdate(data);
-            break;
-        case 'heartbeat':
-            handleHeartbeat(data);
-            break;
-    }
-}
-
-function handleInitialization(data) {
-    isHost = data.isHost;
-    document.getElementById('userRole').textContent = isHost ? 'Admin' : 'Participant';
-    updateControls();
-    attachCustomControlListeners(); // <- Attach buttons only once we know isHost
-
-    videoElement.currentTime = data.state.currentTime;
-    videoElement.playbackRate = data.state.playbackRate;
-    data.state.paused ? videoElement.pause() : videoElement.play();
-}
-
-function handleStateUpdate(data) {
-    const serverTime = data.servertime;
-    const localTime = Date.now();
-
-    latency = localTime - serverTime;
-
-    const currentTime = videoElement.currentTime;
-    const targetTime = data.state.currentTime + (latency / 1000);
-
-    if (Math.abs(currentTime - targetTime) > 0.5) {
-        videoElement.currentTime = targetTime;
-    }
-
-    if (data.state.paused !== videoElement.paused) {
-        data.state.paused ? videoElement.pause() : videoElement.play();
-    }
-
-    videoElement.playbackRate = data.state.playbackRate;
-}
-
-function handleHeartbeat() {
-    ws.send(JSON.stringify({ type: 'heartbeatAck' }));
-}
-
-// Update UI controls
-function updateControls() {
-    const playPauseBtn = document.getElementById('playPauseBtn');
-    const seekBar = document.getElementById('seekBar');
-    playPauseBtn.disabled = !isHost;
-    seekBar.disabled = !isHost;
-}
+let chunkDuration = 0;
+let chunkCount = 0;
+let videoDuration = 0;
 
 // Create new session
 async function createNewSession() {
@@ -165,28 +79,7 @@ async function initializeSession() {
         // After receiving streaming URL
         const streamingUrl = data.streaming_url;
         console.log(streamingUrl)
-
         connectWebSocket(streamingUrl);
-        
-        // Clear existing sources and create new dynamic source
-        const videoElement = document.getElementById('videoPlayer');
-        videoElement.innerHTML = ''; // Clear any existing sources
-        const source = document.createElement('source');
-        source.src = `${streamingUrl}/api/video`;
-        source.type = 'video/mp4';
-        videoElement.appendChild(source);
-        
-        // Load the new source
-        videoElement.load();
-        videoElement.play().catch(error => {
-            // Show play button if autoplay is blocked
-            if (error.name === 'NotAllowedError') {
-                const playBtn = document.getElementById('playPauseBtn');
-                playBtn.disabled = false;
-                playBtn.textContent = 'Start Playback';
-                setStatus('Click play to start video', false);
-            }
-        });        
 
         document.getElementById('sessionKeyDisplay').textContent = sessionKey;
         document.getElementById('userRole').textContent = isHost ? 'Host' : 'Participant';
@@ -218,37 +111,178 @@ async function initializeSession() {
     }
 }
 
-// Entry
-if (sessionKey) {
-    console.log('Session key found, starting initialization');
-    initializeSession();
-} else {
-    console.log('No session key found, creating new session');
-    createNewSession();
+// Initialize WebSocket connection
+function connectWebSocket(streamingUrl) {
+    const wsUrl = new URL(`${streamingUrl.replace('http', 'ws')}/ws`);
+    wsUrl.searchParams.set('sessionID', sessionKey);
+    if (isHost) {
+        wsUrl.searchParams.set('isHost', 'true');
+    }
+
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+        console.log('WebSocket connected');
+        setStatus('Connected to session', false);
+        // Request video metadata once connection is established
+        getVideoMetadata();
+    };
+
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        handleSyncMessage(data);
+    };
+
+    ws.onclose = () => {
+        console.log('WebSocket disconnected');
+        setStatus('Connection lost - attempting to reconnect...', true);
+        setTimeout(() => connectWebSocket(streamingUrl), 3000);
+    };
+
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        setStatus('Connection error', true);
+    };
 }
 
+function handleInitialization(data) {
+    isHost = data.isHost;
+    document.getElementById('userRole').textContent = isHost ? 'Admin' : 'Participant';
+    updateControls();
+    attachCustomControlListeners(); // <- Attach buttons only once we know isHost
 
-function reloadVideoSource() {
+    videoElement.currentTime = data.state.currentTime;
+    videoElement.playbackRate = data.state.playbackRate;
+    data.state.paused ? videoElement.pause() : videoElement.play();
+}
+
+function handleSyncMessage(data) {
+    switch (data.type) {
+        case 'init':
+            handleInitialization(data);
+            break;
+        case 'stateUpdate':
+            handleStateUpdate(data);
+            break;
+        case 'videoMetadata':
+            handleVideoMetadata(data);
+            break;
+        case 'heartbeat':
+            handleHeartbeat(data);
+            break;
+    }
+}
+
+function handleVideoMetadata(data) {
+    console.log('Video metadata:', data.state);
+    chunkDuration = data.state.chunkDuration;
+    chunkCount = data.state.chunkCount;
+    videoDuration = data.state.videoDuration;
+    videoFileType = data.state.videoFileType;
+    
+    // Get streaming URL from the window
+    const streamingUrl = ws.url.replace('ws://', 'http://').replace('/ws', '');
+    
+    // Create MediaSource
+    const mediaSource = new MediaSource();
+    videoElement.src = URL.createObjectURL(mediaSource);
+    
+    mediaSource.addEventListener('sourceopen', async () => {
+        // Use correct MIME type for MP4 files
+        const mimeCodec = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
+        
+        // Check if the browser supports this MIME type
+        if (!MediaSource.isTypeSupported(mimeCodec)) {
+            console.error('Browser does not support this MIME type:', mimeCodec);
+            setStatus('Your browser does not support this video format', true);
+            return;
+        }
+
+        try{
+            mediaSource.duration = videoDuration;
+            console.log("Setting video duration to:", videoDuration);
+            triggerLoadedMetadata();
+        } catch (e) {
+            console.error('Error setting up MediaSource:', e);
+            setStatus('Error setting up video player', true);
+        }
+        
+        // try {
+        //     const sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
+        //     mediaSource.duration = videoDuration;
+            
+        //     // Function to load and append chunks
+        //     loadInitialChunks(sourceBuffer, streamingUrl);
+            
+        //     // Set up monitoring for continuous loading
+        //     setupChunkBuffering(sourceBuffer, streamingUrl);
+        // } catch (e) {
+        //     console.error('Error setting up MediaSource:', e);
+        //     setStatus('Error setting up video player', true);
+        // }
+    });
+}
+
+// Send player state to backend
+function sendPlayerState(type) {
+    if (!isHost || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const video_state = {
+        type: 'stateUpdate',
+        state: {
+            paused: videoElement.paused,
+            currentTime: videoElement.currentTime,
+            playbackRate: videoElement.playbackRate,
+            timestamp: Date.now()
+        }
+    };
+    ws.send(JSON.stringify(video_state));
+}
+
+function handleStateUpdate(data) {
+    const serverTime = data.servertime;
+    const localTime = Date.now();
+
+    latency = localTime - serverTime;
+
     const currentTime = videoElement.currentTime;
-    videoElement.src = `${streamingUrl}/api/video?t=${Date.now()}`;
-    videoElement.currentTime = currentTime;
-    videoElement.play();
+    const targetTime = data.state.currentTime + (latency / 1000);
+
+    if (Math.abs(currentTime - targetTime) > 0.5) {
+        videoElement.currentTime = targetTime;
+    }
+
+    if (data.state.paused !== videoElement.paused) {
+        data.state.paused ? videoElement.pause() : videoElement.play();
+    }
+
+    videoElement.playbackRate = data.state.playbackRate;
 }
 
-// Handle DOM video events
-videoElement.addEventListener('play', () => sendPlayerState('play'));
-videoElement.addEventListener('pause', () => sendPlayerState('pause'));
-videoElement.addEventListener('seeked', () => sendPlayerState('seek'));
+function handleHeartbeat() {
+    ws.send(JSON.stringify({ type: 'heartbeatAck' }));
+}
 
-videoElement.addEventListener('timeupdate', () => {
-    document.getElementById('currentTime').textContent = formatTime(videoElement.currentTime);
-    document.getElementById('seekBar').value = videoElement.currentTime;
-});
+function getVideoMetadata() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        // WebSocket not ready, set timeout to retry
+        console.log("WebSocket not ready, retrying in 500ms...");
+        setTimeout(getVideoMetadata, 500);
+        return;
+    }
+    
+    // WebSocket is open, send request
+    console.log("Requesting video metadata");
+    ws.send(JSON.stringify({ type: 'videoMetadata' }));
+}
 
-videoElement.addEventListener('loadedmetadata', () => {
-    document.getElementById('seekBar').max = videoElement.duration;
-    document.getElementById('duration').textContent = formatTime(videoElement.duration);
-});
+// Update UI controls
+function updateControls() {
+    const playPauseBtn = document.getElementById('playPauseBtn');
+    const seekBar = document.getElementById('seekBar');
+    playPauseBtn.disabled = !isHost;
+    seekBar.disabled = !isHost;
+}
 
 // Custom button listeners
 function attachCustomControlListeners() {
@@ -270,13 +304,6 @@ function attachCustomControlListeners() {
     });
 }
 
-// Helper: format time
-function formatTime(seconds) {
-    const date = new Date(0);
-    date.setSeconds(seconds);
-    return date.toISOString().substr(11, 8);
-}
-
 // Status message display
 function setStatus(message, isError) {
     const statusElement = document.getElementById('statusMessage');
@@ -288,24 +315,117 @@ function setStatus(message, isError) {
     }, 3000);
 }
 
-// Send player state to backend
-function sendPlayerState(type) {
-    // console.log(ws)
-    if (!isHost || !ws || ws.readyState !== WebSocket.OPEN) return;
+// Handle DOM video events
+videoElement.addEventListener('play', () => sendPlayerState('play'));
+videoElement.addEventListener('pause', () => sendPlayerState('pause'));
+videoElement.addEventListener('seeked', () => sendPlayerState('seek'));
 
-    const video_state = {
-        type: 'stateUpdate',
-        state: {
-            // sessionKey: sessionStorage.getItem('sessionKey'),
-            // hostToken: sessionStorage.getItem('hostToken'),
-            paused: videoElement.paused,
-            currentTime: videoElement.currentTime,
-            playbackRate: videoElement.playbackRate,
-            timestamp: Date.now()
-        }
-    };
-    ws.send(JSON.stringify(video_state));
-    // console.log("Sent update")
+videoElement.addEventListener('timeupdate', () => {
+    document.getElementById('currentTime').textContent = formatTime(videoElement.currentTime);
+    document.getElementById('seekBar').value = videoElement.currentTime;
+});
+
+videoElement.addEventListener('loadedmetadata', () => {
+    document.getElementById('seekBar').max = videoElement.duration;
+    document.getElementById('duration').textContent = formatTime(videoElement.duration);
+});
+
+// Entry
+if (sessionKey) {
+    console.log('Session key found, starting initialization');
+    initializeSession();
+} else {
+    console.log('No session key found, creating new session');
+    createNewSession();
 }
 
-// When playing the video for the first time through the host, send a play sync as host can join whenever.
+///////////////////////////////// CHUNK BUFFERING //////////////////////////////////
+// Load first 3 chunks to buffer
+async function loadInitialChunks(sourceBuffer, streamingUrl) {
+    for (let i = 1; i <= 3; i++) {
+        await fetchAndAppendChunk(i, sourceBuffer, streamingUrl);
+    }
+    
+    // Start playback after initial chunks are loaded
+    videoElement.play().catch(e => {
+        console.log('Autoplay prevented:', e);
+    });
+}
+
+// Keep loading chunks to maintain at least 3 chunks ahead
+function setupChunkBuffering(sourceBuffer, streamingUrl) {
+    videoElement.addEventListener('timeupdate', () => {
+        const currentChunk = Math.floor(videoElement.currentTime / chunkDuration) + 1;
+        const bufferedChunks = getBufferedChunks();
+        
+        // Always try to keep 3 chunks ahead
+        for (let i = 0; i < 3; i++) {
+            const chunkToLoad = currentChunk + i;
+            if (chunkToLoad <= chunkCount && !bufferedChunks.includes(chunkToLoad)) {
+                fetchAndAppendChunk(chunkToLoad, sourceBuffer, streamingUrl);
+            }
+        }
+    });
+}
+
+// Helper to fetch and append a chunk
+async function fetchAndAppendChunk(chunkIndex, sourceBuffer, streamingUrl) {
+    // Format chunkId with leading zeros (001, 002, etc.)
+    const chunkId = String(chunkIndex).padStart(3, '0');
+    
+    try {
+        const response = await fetch(`${streamingUrl}/api/video/${chunkId}`);
+        const arrayBuffer = await response.arrayBuffer();
+        
+        // Wait if the source buffer is updating
+        await waitForSourceBuffer(sourceBuffer);
+        
+        // Append the chunk data
+        sourceBuffer.appendBuffer(arrayBuffer);
+        console.log(`Appended chunk ${chunkId}`);
+        
+        return new Promise(resolve => {
+            sourceBuffer.addEventListener('updateend', () => resolve(), {once: true});
+        });
+    } catch (e) {
+        console.error(`Error loading chunk ${chunkId}:`, e);
+    }
+}
+
+function waitForSourceBuffer(sourceBuffer) {
+    return new Promise(resolve => {
+        if (!sourceBuffer.updating) {
+            resolve();
+        } else {
+            sourceBuffer.addEventListener('updateend', () => resolve(), {once: true});
+        }
+    });
+}
+
+function getBufferedChunks() {
+    const bufferedChunks = [];
+    for (let i = 0; i < videoElement.buffered.length; i++) {
+        const start = videoElement.buffered.start(i);
+        const end = videoElement.buffered.end(i);
+        
+        const startChunk = Math.floor(start / chunkDuration) + 1;
+        const endChunk = Math.floor(end / chunkDuration) + 1;
+        
+        for (let j = startChunk; j <= endChunk; j++) {
+            bufferedChunks.push(j);
+        }
+    }
+    return bufferedChunks;
+}
+
+///////////////////////////////// Helper functions //////////////////////////////////
+function formatTime(seconds) {
+    const date = new Date(0);
+    date.setSeconds(seconds);
+    return date.toISOString().substr(11, 8);
+}
+
+function triggerLoadedMetadata() {
+    const event = new Event('loadedmetadata');
+    videoElement.dispatchEvent(event);
+}

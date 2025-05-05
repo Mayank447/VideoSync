@@ -40,6 +40,13 @@ type RedisState struct {
 	Timestamp    int64   `json:"timestamp"`
 }
 
+type VideoManifest struct {
+	ChunkDuration int     `json:"chunkDuration"` // Duration in seconds
+	ChunkCount    int     `json:"chunkCount"`
+	VideoDuration float64 `json:"videoDuration"` // Duration in seconds
+	VideoFileType string  `json:"videoFileType"`
+}
+
 var (
 	// [TODO] Get the below 4 param through command line
 	mainServerURL = "http://localhost:8080"
@@ -66,9 +73,10 @@ var (
 )
 
 const (
-	videoPath          = "../sample.mp4"
+	videoPath          = "../chunks/chunk_001.mp4"
 	HEARTBEAT_INTERVAL = 30
 	REDIS_MSG_EXPIRY   = 24 * time.Hour
+	CHUNK_DURATION     = 5
 )
 
 var ctx = context.Background()
@@ -113,6 +121,7 @@ func main() {
 	r.HandleFunc("/ws", handleWebSocket) // [TODO]
 	r.HandleFunc("/status", handleStatus)
 	r.HandleFunc("/api/video", streamVideo).Methods("GET", "HEAD")
+	r.HandleFunc("/api/video/{chunkID}", streamVideoChunk).Methods("GET", "HEAD", "OPTIONS")
 
 	// Start server
 	log.Printf("Streaming server starting on port %s", serverPort)
@@ -177,7 +186,6 @@ func sendHeartbeats() {
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	log.Println(r.URL)
 	sessionID := r.URL.Query().Get("sessionID")
 	if sessionID == "" {
 		http.Error(w, "Missing session ID", http.StatusBadRequest)
@@ -240,6 +248,10 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				"state":      state,
 				"servertime": time.Now().UnixMilli(),
 			})
+			if err != nil {
+				log.Println("Error marshaling state:", err)
+				return
+			}
 
 			select {
 			case client.send <- payload:
@@ -327,11 +339,28 @@ func handleClientMessage(client *ClientConnection, message []byte) {
 
 				// Publish the state update to all clients in this session
 				publishStateUpdate(client.sessionID, msg.State)
-
-				// Also broadcast directly to connected clients on this server
-				// broadcastState(client.sessionID, msg.State)
 			}
 		}
+
+	case "videoMetadata":
+		videoMetadata := VideoManifest{
+			ChunkDuration: 5,
+			ChunkCount:    10,
+			VideoDuration: 117,
+			VideoFileType: "mp4",
+		}
+
+		payload, err := json.Marshal(map[string]interface{}{
+			"type":  "videoMetadata",
+			"state": videoMetadata,
+		})
+
+		if err != nil {
+			log.Println("Error marshaling video metadata:", err)
+			return
+		}
+		client.send <- payload
+
 	case "heartbeat":
 		// Send heartbeat acknowledgment
 		client.conn.WriteJSON(map[string]string{"type": "heartbeatAck"})
@@ -389,7 +418,8 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, status)
 }
 
-// Video streaming endpoint
+// ///////////////////////////////////// VIDEO CHUNK FUNCTIONS //////////////////////////////////////////////////////////////
+
 func streamVideo(w http.ResponseWriter, r *http.Request) {
 	// Enhanced CORS headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -415,6 +445,29 @@ func streamVideo(w http.ResponseWriter, r *http.Request) {
 
 	stat, _ := videoFile.Stat()
 	http.ServeContent(w, r, "video.mp4", stat.ModTime(), videoFile)
+}
+
+func streamVideoChunk(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	chunkID := vars["chunkID"]
+
+	chunkPath := fmt.Sprintf("../chunks/chunk_%s.mp4", chunkID)
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	videoFile, err := os.Open(chunkPath)
+	if err != nil {
+		http.Error(w, "Chunk not found", http.StatusNotFound)
+		return
+	}
+	defer videoFile.Close()
+
+	stat, _ := videoFile.Stat()
+	http.ServeContent(w, r, fmt.Sprintf("chunk_%s.mp4", chunkID), stat.ModTime(), videoFile)
 }
 
 // ///////////////////////////////////// PUBSUB FUNCTIONS //////////////////////////////////////////////////////////////
@@ -509,7 +562,6 @@ func broadcastState(sessionID string, state json.RawMessage) {
 		}
 
 	}
-
 }
 
 /////////////////////////////////////// HELPER FUNCTIONS //////////////////////////////////////////////////////////////
