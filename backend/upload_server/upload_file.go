@@ -11,20 +11,29 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 )
 
-const MAX_UPLOAD_SIZE = 100 << 20 // 100 MB
+const (
+	MAX_UPLOAD_SIZE  = 100 << 20 // 100 MB
+	REDIS_MSG_EXPIRY = 24 * time.Hour
+)
 
 var (
 	bucket   string
 	uploader *manager.Uploader
+
+	// Redis globals
+	rdb *redis.Client
+	ctx = context.Background()
 )
 
 // init() will run before main()
@@ -43,6 +52,13 @@ func init() {
 
 	// create a high-level uploader
 	uploader = manager.NewUploader(s3.NewFromConfig(cfg))
+
+	// initialize Redis client
+	rdb = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
+	})
 }
 
 // handleCORS sets permissive CORS headers
@@ -202,7 +218,25 @@ func handleVideoUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 5) clean up & return the master playlist URL
+	// ================================
+	// 4) persisted initial Redis state
+	// ================================
+	// build our initial playback state
+	initState := map[string]interface{}{
+		"paused":       false,
+		"currentTime":  0,
+		"playbackRate": 1,
+		"timestamp":    time.Now().UnixMilli(),
+	}
+	stateBytes, _ := json.Marshal(initState)
+	stateKey := fmt.Sprintf("session:%s:state", sessionID)
+	if err := rdb.SetEX(ctx, stateKey, stateBytes, REDIS_MSG_EXPIRY).Err(); err != nil {
+		log.Printf("error setting initial redis state for %s: %v", sessionID, err)
+	}
+
+	// ================================
+	// 5) respond with playlistURL
+	// ================================
 	os.RemoveAll(tmpDir)
 	region := os.Getenv("AWS_REGION")
 	playlistURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s/master.m3u8",

@@ -11,7 +11,7 @@ async function createSession() {
         const { sessionKey, hostToken } = await response.json();
         const sessionKeyElement = document.getElementById('sessionKey');
         
-        // Always display the session key
+        // Show the session key to the host
         sessionKeyElement.textContent = sessionKey;
         document.getElementById('sessionKeyContainer').style.display = 'block';
 
@@ -47,12 +47,12 @@ async function createSession() {
             sessionKeyElement.select();
         }
         
-        // Store host token in both session storage and URL
+        // Store host token but do NOT redirect here.
+        // The host can now paste the session key into the "Join Session" box
+        // and click Join Session to go to the upload page.
         sessionStorage.setItem('hostToken', hostToken);
-        const newUrl = new URL(window.location.href);
-        newUrl.searchParams.set('hostToken', hostToken);
-        window.history.replaceState({}, '', newUrl);
-        
+        // Redirect host immediately to upload UI
+        window.location.href = `pages/upload_video.html?sessionKey=${encodeURIComponent(sessionKey)}&hostToken=${encodeURIComponent(hostToken)}`;
     } catch (error) {
         console.error('Session creation error:', error);
         showTemporaryMessage('Error creating session. Please try again.', 'error');
@@ -89,20 +89,21 @@ async function joinSession() {
         
         // Validate session with host token if available
         const validateUrl = `${BACKEND_URL}/api/sessions/${encodeURIComponent(sessionKey)}/validate`;
-        const urlWithParams = hostToken ? 
-            `${validateUrl}?hostToken=${encodeURIComponent(hostToken)}` : 
-            validateUrl;
+        const urlWithParams = hostToken 
+            ? `${validateUrl}?hostToken=${encodeURIComponent(hostToken)}` 
+            : validateUrl;
             
         console.log('Sending validation request to:', urlWithParams);
         
         const response = await fetch(urlWithParams);
-        
         if (!response.ok) throw new Error('Invalid session key');
         
         const { valid } = await response.json();
         if (!valid) throw new Error('Invalid session key');
-        
-        window.location.href = `pages/player.html?sessionKey=${encodeURIComponent(sessionKey)}`;
+
+        // Redirect only on Join click
+        window.location.href = 
+              `pages/player.html?sessionKey=${encodeURIComponent(sessionKey)}`;
         
     } catch (error) {
         showError('Invalid session key. Please check and try again.');

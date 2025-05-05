@@ -6,14 +6,17 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
@@ -73,13 +76,14 @@ var (
 
 	rdb    *redis.Client
 	pubsub *redis.PubSub
+
+	s3Client *s3.Client
+	s3Bucket string
 )
 
 // HLS directory structure
 const (
-	HLS_BASE_DIR       = "../hls"
 	HLS_PLAYLIST_NAME  = "playlist.m3u8"
-	HLS_SEGMENT_DIR    = "segments"
 	HLS_MASTER_NAME    = "master.m3u8"
 	HEARTBEAT_INTERVAL = 30
 	REDIS_MSG_EXPIRY   = 24 * time.Hour
@@ -87,6 +91,20 @@ const (
 )
 
 var ctx = context.Background()
+
+func init() {
+	// Initialize AWS S3 client
+	region := os.Getenv("AWS_REGION")
+	s3Bucket = os.Getenv("S3_BUCKET")
+	if region == "" || s3Bucket == "" {
+		log.Fatal("AWS_REGION and S3_BUCKET environment variables must be set")
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	if err != nil {
+		log.Fatalf("unable to load AWS SDK config: %v", err)
+	}
+	s3Client = s3.NewFromConfig(cfg)
+}
 
 func main() {
 	rdb = redis.NewClient(&redis.Options{
@@ -100,9 +118,6 @@ func main() {
 		log.Fatalf("Could not connect to Redis: %v", err)
 	}
 	log.Println(pong, "Connected to Redis")
-
-	// Initialize HLS system
-	initHLS()
 
 	portFlag := flag.String("port", "", "Port to run the server on")
 	flag.Parse()
@@ -133,9 +148,7 @@ func main() {
 
 	// HLS routes
 	r.HandleFunc("/hls/{sessionID}/master.m3u8", serveHLSMasterPlaylist).Methods("GET", "OPTIONS")
-	r.HandleFunc("/hls/{sessionID}/playlist.m3u8", serveHLSMediaPlaylist).Methods("GET", "OPTIONS")
 	r.HandleFunc("/hls/{sessionID}/{quality}/playlist.m3u8", serveHLSQualityPlaylist).Methods("GET", "OPTIONS")
-	r.HandleFunc("/hls/{sessionID}/{segmentName}", serveHLSSegment).Methods("GET", "OPTIONS")
 	r.HandleFunc("/hls/{sessionID}/{quality}/{segmentName}", serveHLSQualitySegment).Methods("GET", "OPTIONS")
 
 	// Wrap the router with Gorilla's CORS handler:
@@ -549,17 +562,6 @@ func respondError(w http.ResponseWriter, statusCode int, errorMessage string) {
 }
 
 // ///////////////////////////////////// HLS FUNCTIONS //////////////////////////////////////////////////////////////
-func initHLS() {
-	// Create base HLS directory if it doesn't exist
-	if _, err := os.Stat(HLS_BASE_DIR); err != nil {
-		if os.IsNotExist(err) {
-			log.Fatalf("HLS base directory doesn't exist: %v", err)
-		}
-	}
-
-	log.Println("HLS system initialized")
-}
-
 // Handle CORS preflight requests
 func handleCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -577,49 +579,23 @@ func serveHLSMasterPlaylist(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	sessionID := vars["sessionID"]
 
-	// Check if the master playlist file exists
-	masterPath := filepath.Join(HLS_BASE_DIR, HLS_MASTER_NAME)
-	if _, err := os.Stat(masterPath); err == nil {
-		// Master playlist exists, serve it
-		http.ServeFile(w, r, masterPath)
-		log.Printf("Served existing master playlist for session %s", sessionID)
-		return
-	}
-
-	// Serve the newly generated master playlist
-	http.ServeFile(w, r, masterPath)
-}
-
-// Serve HLS media playlist (contains segment info)
-func serveHLSMediaPlaylist(w http.ResponseWriter, r *http.Request) {
-	handleCORS(w)
-	if r.Method == "OPTIONS" {
-		return
-	}
-
-	vars := mux.Vars(r)
-	sessionID := vars["sessionID"]
-
-	playlistPath := filepath.Join(HLS_BASE_DIR, HLS_PLAYLIST_NAME)
-	// Check if playlist exists
-	if _, err := os.Stat(playlistPath); os.IsNotExist(err) {
-		http.Error(w, "Playlist not found", http.StatusNotFound)
-		return
-	}
-
-	// Read the playlist content
-	playlistContent, err := os.ReadFile(playlistPath)
+	// Fetch master playlist from S3
+	key := sessionID + "/" + HLS_MASTER_NAME
+	obj, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s3Bucket),
+		Key:    aws.String(key),
+	})
 	if err != nil {
-		http.Error(w, "Error reading playlist", http.StatusInternalServerError)
-		log.Printf("Error reading playlist for session %s: %v", sessionID, err)
+		log.Printf("[serveHLSMasterPlaylist] S3 GetObject failed for key %q: %v", key, err)
+		http.Error(w, "Master playlist not found", http.StatusNotFound)
 		return
 	}
+	defer obj.Body.Close()
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Write(playlistContent)
-
-	log.Printf("Served media playlist for session %s", sessionID)
+	io.Copy(w, obj.Body)
+	log.Printf("Served master playlist for session %s from S3", sessionID)
+	return
 }
 
 // Add a quality-specific playlist handler
@@ -633,54 +609,29 @@ func serveHLSQualityPlaylist(w http.ResponseWriter, r *http.Request) {
 	sessionID := vars["sessionID"]
 	quality := vars["quality"]
 
-	playlistPath := filepath.Join(HLS_BASE_DIR, quality, HLS_PLAYLIST_NAME)
-
-	// Check if playlist exists
-	if _, err := os.Stat(playlistPath); os.IsNotExist(err) {
+	// Fetch quality playlist from S3
+	key := sessionID + "/" + quality + "/" + HLS_PLAYLIST_NAME
+	obj, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s3Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		log.Printf("[serveHLSQualityPlaylist] S3 GetObject failed for key %q: %v", key, err)
 		http.Error(w, "Quality playlist not found", http.StatusNotFound)
 		return
 	}
+	defer obj.Body.Close()
 
-	// Read the playlist content
-	http.ServeFile(w, r, playlistPath)
-	log.Printf("Served %s playlist for session %s", quality, sessionID)
-}
-
-// Serve HLS segment
-func serveHLSSegment(w http.ResponseWriter, r *http.Request) {
-	handleCORS(w)
-	log.Println("Serving segment")
-	if r.Method == "OPTIONS" {
-		return
-	}
-
-	vars := mux.Vars(r)
-	sessionID := vars["sessionID"]
-	segmentName := vars["segmentName"]
-
-	// Validate segment name to prevent directory traversal
-	if strings.Contains(segmentName, "..") || strings.Contains(segmentName, "/") {
-		http.Error(w, "Invalid segment name", http.StatusBadRequest)
-		return
-	}
-
-	segmentPath := filepath.Join(HLS_BASE_DIR, HLS_SEGMENT_DIR, segmentName)
-	log.Printf("Serving segment %s for session %s", segmentPath, sessionID)
-	// Check if segment exists
-	if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
-		http.Error(w, "Segment not found", http.StatusNotFound)
-		return
-	}
-
-	// Serve the segment file
-	http.ServeFile(w, r, segmentPath)
-	log.Printf("Served segment %s for session %s", segmentName, sessionID)
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	io.Copy(w, obj.Body)
+	log.Printf("Served %s playlist for session %s from S3", quality, sessionID)
+	return
 }
 
 // Add a quality-specific segment handler
 func serveHLSQualitySegment(w http.ResponseWriter, r *http.Request) {
 	handleCORS(w)
-	log.Println("Serving quality segment")
+	log.Println("Serving quality segment from S3")
 	if r.Method == "OPTIONS" {
 		return
 	}
@@ -696,15 +647,21 @@ func serveHLSQualitySegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	segmentPath := filepath.Join(HLS_BASE_DIR, quality, segmentName)
-	log.Printf("Serving segment %s for session %s", segmentPath, sessionID)
-	// Check if segment exists
-	if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+	// Fetch segment from S3
+	key := sessionID + "/" + quality + "/" + segmentName
+	obj, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s3Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		log.Printf("[serveHLSQualitySegment] S3 GetObject failed for key %q: %v", key, err)
 		http.Error(w, "Quality segment not found", http.StatusNotFound)
 		return
 	}
+	defer obj.Body.Close()
 
-	// Serve the segment file
-	http.ServeFile(w, r, segmentPath)
-	log.Printf("Served %s segment %s for session %s", quality, segmentName, sessionID)
+	w.Header().Set("Content-Type", "video/MP2T")
+	io.Copy(w, obj.Body)
+	log.Printf("Served segment %s for session %s from S3", segmentName, sessionID)
+	return
 }

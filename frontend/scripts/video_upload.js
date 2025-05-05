@@ -93,10 +93,23 @@ function generateSessionID() {
 return 'sess-' + Math.random().toString(36).substr(2, 9);
 }
 
+// 1) Immediately read the sessionKey/sessionID from the URL and display it:
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  // support either ?sessionKey= or ?sessionID=
+  const sid = params.get('sessionKey') || params.get('sessionID') || 'N/A';
+  // override the JS-only random generation
+  sessionID = sid;
+  const disp = document.getElementById('sessionIDDisplay');
+  if (disp) disp.textContent = sid;
+})();
+
 // 1) Listen for our custom event anywhere in your app:
 window.addEventListener('videoUploaded', e => {
-  const { sessionID, fileName, path } = e.detail;
+  const { sessionID, playlistURL } = e.detail;
   console.log('🎉 upload finished:', e.detail);
-  statusEl.textContent = `Upload complete: ${fileName}`;
-  // now you can kick off HLS-segmentation or navigate to the player…
+  statusEl.textContent = `Upload complete: ${sessionID}`;
+  // navigate to player.html so it can load the HLS master playlist
+  window.location.href = 
+    `player.html?sessionID=${sessionID}&playlistURL=${encodeURIComponent(playlistURL)}`;
 });
