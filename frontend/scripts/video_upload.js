@@ -1,103 +1,102 @@
-const dropZone = document.getElementById('dropZone');
-const fileInput = document.getElementById('fileInput');
-const preview = document.getElementById('preview');
+const dropZone    = document.getElementById('dropZone');
+const fileInput   = document.getElementById('fileInput');
+const preview     = document.getElementById('preview');
 const progressBar = document.getElementById('progressBar');
-const progressContainer = document.querySelector('.progress-container');
-const statusDiv = document.getElementById('status');
+const statusEl    = document.getElementById('status');
+
+let sessionID = null;
 
 // Prevent default drag behaviors
-['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-    dropZone.addEventListener(eventName, preventDefaults, false);
-    document.body.addEventListener(eventName, preventDefaults, false);
-});
-
-// Highlight drop zone when item is dragged over it
-['dragenter', 'dragover'].forEach(eventName => {
-    dropZone.addEventListener(eventName, highlight, false);
-});
-
-['dragleave', 'drop'].forEach(eventName => {
-    dropZone.addEventListener(eventName, unhighlight, false);
-});
-
-// Handle dropped files
-dropZone.addEventListener('drop', handleDrop, false);
-fileInput.addEventListener('change', handleFileSelect, false);
-
-function preventDefaults(e) {
+['dragenter','dragover','dragleave','drop'].forEach(evt =>
+dropZone.addEventListener(evt, e => {
     e.preventDefault();
     e.stopPropagation();
-}
+})
+);
 
-function highlight(e) {
-    dropZone.classList.add('dragover');
-}
+// Highlight drop zone
+dropZone.addEventListener('dragover', () => dropZone.classList.add('dragover'));
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
 
-function unhighlight(e) {
-    dropZone.classList.remove('dragover');
-}
+// Handle file drop
+dropZone.addEventListener('drop', e => {
+dropZone.classList.remove('dragover');
+const file = e.dataTransfer.files[0];
+handleFile(file);
+});
 
-function handleDrop(e) {
-    const dt = e.dataTransfer;
-    const files = dt.files;
-    handleFiles(files);
-}
+// Handle file picker
+fileInput.addEventListener('change', () => {
+const file = fileInput.files[0];
+handleFile(file);
+});
 
-function handleFileSelect(e) {
-    const files = e.target.files;
-    handleFiles(files);
-}
-
-function handleFiles(files) {
-    const file = files[0];
-
-if (!file.type.startsWith('video/')) {
-    showStatus('Please upload a video file', 'error');
-    return;
-}
-
-// Show preview
-preview.style.display = 'block';
+function handleFile(file) {
+if (!file) return;
+// Show video preview
 preview.src = URL.createObjectURL(file);
+preview.load();
+preview.onloadedmetadata = () => {
+    statusEl.textContent = `Preview: ${file.name} (${(file.size/1024/1024).toFixed(2)} MB)`;
+};
 
-// Start upload
+// Generate sessionID once (or set from elsewhere)
+if (!sessionID) {
+    sessionID = generateSessionID();
+}
+
+// Kick off the upload
 uploadFile(file);
 }
 
 function uploadFile(file) {
-    const formData = new FormData();
-    formData.append('video', file);
+const url = `http://localhost:8082/api/video/${sessionID}`;
+const xhr = new XMLHttpRequest();
 
-    const xhr = new XMLHttpRequest();
+xhr.open('POST', url, true);
+xhr.setRequestHeader('Accept', 'application/json');
 
-    xhr.upload.addEventListener('progress', e => {
-        if (e.lengthComputable) {
-            const percent = (e.loaded / e.total) * 100;
-            progressBar.style.width = `${percent}%`;
-            progressContainer.style.display = 'block';
-        }
-    });
-
-    xhr.onreadystatechange = () => {
-    if (xhr.readyState === XMLHttpRequest.DONE) {
-        progressContainer.style.display = 'none';
-        
-        if (xhr.status === 200) {
-            const response = JSON.parse(xhr.responseText);
-            showStatus(`Upload successful! Video ID: ${response.videoId}`, 'success');
-            // You can add redirect logic here
-        } else {
-            showStatus(`Upload failed: ${xhr.responseText}`, 'error');
-        }
+// Progress event
+xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+    const pct = Math.round((e.loaded / e.total) * 100);
+    progressBar.style.width = pct + '%';
+    statusEl.textContent = `Uploading… ${pct}%`;
     }
 };
 
-xhr.open('POST', 'http:localhost:8090/api/upload', true); // Replace with your upload endpoint
-xhr.send(formData);
+// Completion handler
+xhr.onload = () => {
+    if (xhr.status === 201) {
+    const resp = JSON.parse(xhr.responseText);
+    // fire a DOM event so any part of your code can react:
+    window.dispatchEvent(
+        new CustomEvent('videoUploaded', { detail: resp })
+    );
+    } else {
+    statusEl.textContent = `Upload failed (${xhr.status}): ${xhr.statusText}`;
+    }
+};
+
+xhr.onerror = () => {
+    statusEl.textContent = 'Upload error. Check console for details.';
+};
+
+// Build form data
+const form = new FormData();
+form.append('video', file, file.name);
+xhr.send(form);
 }
 
-function showStatus(message, type) {
-    statusDiv.style.display = 'block';
-    statusDiv.className = type;
-    statusDiv.textContent = message;
+// Very simple random ID; swap in uuid.js if you like
+function generateSessionID() {
+return 'sess-' + Math.random().toString(36).substr(2, 9);
 }
+
+// 1) Listen for our custom event anywhere in your app:
+window.addEventListener('videoUploaded', e => {
+  const { sessionID, fileName, path } = e.detail;
+  console.log('🎉 upload finished:', e.detail);
+  statusEl.textContent = `Upload complete: ${fileName}`;
+  // now you can kick off HLS-segmentation or navigate to the player…
+});

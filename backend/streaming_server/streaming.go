@@ -86,18 +86,6 @@ const (
 	CHUNK_DURATION     = 5
 )
 
-// Add quality variant definitions
-var qualityVariants = []struct {
-	Name       string
-	Resolution string
-	Bandwidth  int
-	Directory  string
-}{
-	{"720p", "1280x720", 2800000, "720p"},
-	{"480p", "854x480", 1400000, "480p"},
-	{"360p", "640x360", 800000, "360p"},
-}
-
 var ctx = context.Background()
 
 func main() {
@@ -260,7 +248,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Send the initial state to the client
 	if !client.isHost {
-		if client != nil && client.conn != nil {
+		if client.conn != nil {
 			ctx := context.Background()
 			val, err := rdb.Get(ctx, "session:"+client.sessionID+":state").Result()
 
